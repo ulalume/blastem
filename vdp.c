@@ -5848,6 +5848,7 @@ void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value)
 				if (is_stdout_enabled()) {
 					init_terminal();
 					printf("KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
+					fflush(stdout);
 				} else {
 					// GDB remote debugging is enabled, use stderr instead
 					fprintf(stderr, "KDEBUG MESSAGE: %s\n", context->kmod_msg_buffer);
@@ -5859,6 +5860,7 @@ void vdp_reg_write(vdp_context *context, uint16_t reg, uint16_t value)
 				if (is_stdout_enabled()) {
 					init_terminal();
 					printf("KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
+					fflush(stdout);
 				} else {
 					// GDB remote debugging is enabled, use stderr instead
 					fprintf(stderr, "KDEBUG TIMER: %d\n", (context->cycles - context->timer_start_cycle) / 7);
