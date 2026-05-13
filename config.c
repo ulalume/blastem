@@ -695,7 +695,11 @@ void machine_freeze(tern_node *config, debug_callback callback, void *data, char
 		tern_val def = {.ptrval = "ask"};
 		freeze_choice = CHOICE_ASK;
 #endif
-		char *choice = tern_find_path_default(config, "ui\0machine_freeze_action\0", def, TVAL_PTR).ptrval;
+		// env var override (lets headless test runners avoid the GUI "ask" dialog
+		// without modifying the user's global blastem.cfg)
+		char *env_choice = getenv("BLASTEM_FREEZE_ACTION");
+		char *choice = env_choice ? env_choice
+		    : tern_find_path_default(config, "ui\0machine_freeze_action\0", def, TVAL_PTR).ptrval;
 		if (!strcmp(choice, "fatal")) {
 			freeze_choice = CHOICE_FATAL;
 #ifndef DISABLE_NUKLEAR
