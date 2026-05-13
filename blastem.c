@@ -404,7 +404,12 @@ int main(int argc, char ** argv)
 {
 	set_exe_str(argv[0]);
 #ifndef _WIN32
-	if (!(isatty(STDERR_FILENO) && isatty(STDIN_FILENO))) {
+	// BLASTEM_NO_GUI=1 keeps log_msg() purely on stderr/stdout and skips the
+	// modal SDL message-box handler. Required for headless test harnesses
+	// that redirect stderr — otherwise any fatal_error() pops a dialog that
+	// blocks the process indefinitely.
+	if (!getenv("BLASTEM_NO_GUI")
+	    && !(isatty(STDERR_FILENO) && isatty(STDIN_FILENO))) {
 #endif
 		register_log_handler(render_log_handler);
 #ifndef _WIN32
