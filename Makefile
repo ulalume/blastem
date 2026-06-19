@@ -267,6 +267,12 @@ endif
 endif
 AUDIOOBJS=ym2612.o ymf262.o ym_common.o psg.o wave.o flac.o vgm.o event_log.o render_audio.o rf5c164.o
 CONFIGOBJS=config.o tern.o util.o paths.o
+# Embed the UI font (Inter Medium, SIL OFL) on all native targets instead of scanning the
+# system fonts at startup: fast, deterministic across macOS/Linux/Windows, and never fails.
+# BLASTEM_FONT=/path overrides at runtime. wasm keeps its own font_web loader.
+ifneq ($(CPU),wasm)
+FONT:=nuklear_ui/default_font.o nuklear_ui/inter_medium.o
+endif
 NUKLEAROBJS=$(FONT) $(CHOOSER) nuklear_ui/blastem_nuklear.o nuklear_ui/sfnt.o nuklear_ui/debug_ui.o
 RENDEROBJS=ppm.o controller_info.o
 ifdef USE_FBDEV
@@ -425,6 +431,10 @@ upddis$(EXE) : $(UPDDISOBJS:%.o=$(OBJDIR)/%.o)
 
 sh2dis$(EXE) : $(SH2DISOBJS:%.o=$(OBJDIR)/%.o)
 	$(CC) -o $@ $^ $(OPT)
+
+# embed the UI font: generate a C byte array from the .ttf
+nuklear_ui/inter_medium.c : nuklear_ui/Inter-Medium.ttf bin2c.py
+	./bin2c.py $< inter_medium_ttf $@
 
 .PRECIOUS: %.c
 %.c %.h : %.cpu cpu_dsl.py
