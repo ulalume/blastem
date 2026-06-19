@@ -12,6 +12,7 @@
 #include "blastem.h"
 #include "genesis.h"
 #include "bindings.h"
+#include "ctrl_fifo.h"
 #include "util.h"
 #include "paths.h"
 #include "ppm.h"
@@ -1223,6 +1224,7 @@ static void drain_events()
 	{
 		handle_event(&event);
 	}
+	ctrl_fifo_poll();
 }
 
 static char *vid_std_names[NUM_VID_STD] = {"ntsc", "pal", "gamegear"};

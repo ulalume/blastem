@@ -294,7 +294,7 @@ else
 COREOBJS+= sms.o i8255.o korean_sms_multi.o $(Z80OBJS)
 endif
 
-MAINOBJS:=$(COREOBJS) blastem.o $(RENDEROBJS) zip.o  menu.o debug.o gdb_remote.o bindings.o oscilloscope.o
+MAINOBJS:=$(COREOBJS) blastem.o $(RENDEROBJS) zip.o  menu.o debug.o gdb_remote.o bindings.o ctrl_fifo.o oscilloscope.o
 
 LIBOBJS:=$(COREOBJS) libblastem.o rom.db.o $(LIBZOBJS)
 
