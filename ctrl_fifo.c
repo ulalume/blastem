@@ -1,8 +1,7 @@
-// External control FIFO for scripted/headless use. When the environment
-// variable BLASTEM_CTRL_FIFO is set to a path, blastem creates a named pipe
-// there and polls it once per frame for newline-terminated commands, so an
-// external process can drive the emulated gamepad (and trigger screenshots)
-// without window focus or synthetic keyboard events:
+// External control socket for scripted/headless use. When the environment variable
+// BLASTEM_CTRL_SOCK is set to a path, blastem binds a Unix-domain stream socket there and
+// polls it once per frame for newline-terminated commands, so an external process can drive
+// the emulated gamepad and trigger screenshots without window focus or synthetic key events:
 //
 //   pad <num> down <button>   press a pad button (num matches the gamepad
 //   pad <num> up <button>     number in the io config, normally 1 or 2)
@@ -10,35 +9,33 @@
 //
 // Buttons: up down left right a b c x y z start mode
 //
-// Input is injected through the same system_header gamepad_down/up entry
-// points the SDL keyboard/joystick bindings use.
+// Unix-domain sockets (AF_UNIX) work identically on Linux, macOS, and Windows 10+, so this is
+// one transport for all three. Input is injected through the same gamepad_down/up entry points
+// the SDL keyboard/joystick bindings use.
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "ctrl_fifo.h"
-
-#ifdef _WIN32
-
-void ctrl_fifo_poll(void)
-{
-}
-
-#else
-
-#include <errno.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-
+#include "net.h"
 #include "blastem.h"
 #include "system.h"
 #include "io.h"
 #include "render.h"
 #include "util.h"
 
-static int fifo_fd = -1;
+#ifdef _WIN32
+#include <winsock2.h>
+#include <afunix.h>
+#else
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
+
+static int listen_fd = -1;
+static int client_fd = -1;
 
 static uint8_t parse_button(const char *name)
 {
@@ -67,12 +64,12 @@ static void process_command(char *line)
 		char *action = strtok(NULL, " \t");
 		char *button_name = strtok(NULL, " \t");
 		if (!num || !action || !button_name) {
-			warning("ctrl_fifo: expected 'pad <num> <down|up> <button>'\n");
+			warning("ctrl_sock: expected 'pad <num> <down|up> <button>'\n");
 			return;
 		}
 		uint8_t button = parse_button(button_name);
 		if (button == BUTTON_INVALID) {
-			warning("ctrl_fifo: unknown button '%s'\n", button_name);
+			warning("ctrl_sock: unknown button '%s'\n", button_name);
 			return;
 		}
 		if (!current_system) {
@@ -87,7 +84,7 @@ static void process_command(char *line)
 				current_system->gamepad_up(current_system, atoi(num), button);
 			}
 		} else {
-			warning("ctrl_fifo: unknown pad action '%s'\n", action);
+			warning("ctrl_sock: unknown pad action '%s'\n", action);
 		}
 	} else if (!strcmp(cmd, "screenshot")) {
 		char *path = strtok(NULL, "");
@@ -97,35 +94,48 @@ static void process_command(char *line)
 		if (path && *path) {
 			render_save_screenshot(strdup(path));
 		} else {
-			warning("ctrl_fifo: expected 'screenshot <path>'\n");
+			warning("ctrl_sock: expected 'screenshot <path>'\n");
 		}
 	} else {
-		warning("ctrl_fifo: unknown command '%s'\n", cmd);
+		warning("ctrl_sock: unknown command '%s'\n", cmd);
 	}
 }
 
-static void ctrl_fifo_init(void)
+static void ctrl_sock_init(void)
 {
-	const char *path = getenv("BLASTEM_CTRL_FIFO");
+	const char *path = getenv("BLASTEM_CTRL_SOCK");
 	if (!path || !*path) {
 		return;
 	}
-	struct stat st;
-	if (stat(path, &st)) {
-		if (mkfifo(path, 0666)) {
-			warning("ctrl_fifo: failed to create FIFO %s: %s\n", path, strerror(errno));
-			return;
-		}
-	} else if (!S_ISFIFO(st.st_mode)) {
-		warning("ctrl_fifo: %s exists but is not a FIFO\n", path);
+	struct sockaddr_un addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sun_family = AF_UNIX;
+	if (strlen(path) >= sizeof(addr.sun_path)) {
+		warning("ctrl_sock: path too long (max %d): %s\n", (int)sizeof(addr.sun_path) - 1, path);
 		return;
 	}
-	fifo_fd = open(path, O_RDONLY | O_NONBLOCK);
-	if (fifo_fd < 0) {
-		warning("ctrl_fifo: failed to open FIFO %s: %s\n", path, strerror(errno));
-	} else {
-		debug_message("ctrl_fifo: listening on %s\n", path);
+	strcpy(addr.sun_path, path);
+
+	socket_init();
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) {
+		warning("ctrl_sock: socket() failed (err %d)\n", socket_last_error());
+		return;
 	}
+	remove(path); // clear any stale socket file from a previous run
+	if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		warning("ctrl_sock: failed to bind %s (err %d)\n", path, socket_last_error());
+		socket_close(fd);
+		return;
+	}
+	if (listen(fd, 1) < 0) {
+		warning("ctrl_sock: failed to listen on %s (err %d)\n", path, socket_last_error());
+		socket_close(fd);
+		return;
+	}
+	socket_blocking(fd, 0);
+	listen_fd = fd;
+	debug_message("ctrl_sock: listening on %s\n", path);
 }
 
 void ctrl_fifo_poll(void)
@@ -135,34 +145,54 @@ void ctrl_fifo_poll(void)
 	static size_t buffered;
 	if (!initialized) {
 		initialized = 1;
-		ctrl_fifo_init();
+		ctrl_sock_init();
 	}
-	if (fifo_fd < 0) {
+	if (listen_fd < 0) {
 		return;
+	}
+	// Serve one client at a time (the harness connects, sends a few lines, disconnects).
+	if (client_fd < 0) {
+		int c = accept(listen_fd, NULL, NULL);
+		if (c < 0) {
+			return; // no pending connection this frame (or would-block)
+		}
+		socket_blocking(c, 0);
+		client_fd = c;
+		buffered = 0;
 	}
 	for (;;)
 	{
-		ssize_t bytes = read(fifo_fd, buf + buffered, sizeof(buf) - 1 - buffered);
-		if (bytes <= 0) {
-			// EAGAIN (no data), EOF (no writer right now) or error: try again next frame
+		// recv works on a socket fd on both POSIX and Windows (unlike read on Windows)
+		int bytes = (int)recv(client_fd, buf + buffered, sizeof(buf) - 1 - buffered, 0);
+		if (bytes > 0) {
+			buffered += bytes;
+			buf[buffered] = 0;
+			char *start = buf, *newline;
+			while ((newline = strchr(start, '\n')))
+			{
+				*newline = 0;
+				process_command(start);
+				start = newline + 1;
+			}
+			buffered -= start - buf;
+			if (buffered >= sizeof(buf) - 1) {
+				// overlong line with no newline, discard it
+				buffered = 0;
+			}
+			memmove(buf, start, buffered);
+		} else if (bytes == 0) {
+			// client closed the connection; go back to accepting
+			socket_close(client_fd);
+			client_fd = -1;
+			break;
+		} else {
+			if (socket_error_is_wouldblock()) {
+				break; // no more data right now, try again next frame
+			}
+			// real error: drop the client
+			socket_close(client_fd);
+			client_fd = -1;
 			break;
 		}
-		buffered += bytes;
-		buf[buffered] = 0;
-		char *start = buf, *newline;
-		while ((newline = strchr(start, '\n')))
-		{
-			*newline = 0;
-			process_command(start);
-			start = newline + 1;
-		}
-		buffered -= start - buf;
-		if (buffered >= sizeof(buf) - 1) {
-			// overlong line with no newline, discard it
-			buffered = 0;
-		}
-		memmove(buf, start, buffered);
 	}
 }
-
-#endif //_WIN32
