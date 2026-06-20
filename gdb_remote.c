@@ -19,6 +19,9 @@ int gdb_sock;
 #define GDB_READ read
 #define GDB_WRITE write
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #endif
 
 #include "gdb_remote.h"
@@ -604,6 +607,12 @@ void gdb_remote_init(void)
 	curbuf = NULL;
 	bufsize = INITIAL_BUFFER_SIZE;
 #ifdef _WIN32
+	// Windows has no usable stdin/stdout pipe transport for gdb, so it always
+	// listens on TCP. Port is BLASTEM_GDB_PORT or 1234 by default.
+	const char *gdb_port = getenv("BLASTEM_GDB_PORT");
+	if (!gdb_port) {
+		gdb_port = "1234";
+	}
 	socket_init();
 
 	struct addrinfo request, *result;
@@ -611,7 +620,7 @@ void gdb_remote_init(void)
 	request.ai_family = AF_INET;
 	request.ai_socktype = SOCK_STREAM;
 	request.ai_flags = AI_PASSIVE;
-	getaddrinfo("localhost", "1234", &request, &result);
+	getaddrinfo("localhost", gdb_port, &request, &result);
 
 	int listen_sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
 	if (listen_sock < 0) {
@@ -630,6 +639,45 @@ void gdb_remote_init(void)
 	}
 	socket_close(listen_sock);
 #else
+	// Unix defaults to the stdin/stdout pipe transport (`target remote | blastem rom.bin -D`).
+	// If BLASTEM_GDB_PORT is set, listen on TCP localhost:<port> instead and dup the
+	// accepted socket onto stdin/stdout, so the pipe-based transport below works
+	// unchanged. This lets gdbserver-style clients (e.g. VS Code) connect with
+	// `target remote localhost:<port>` rather than spawning blastem over a pipe.
+	const char *gdb_port = getenv("BLASTEM_GDB_PORT");
+	if (gdb_port) {
+		struct addrinfo request, *result;
+		memset(&request, 0, sizeof(request));
+		request.ai_family = AF_INET;
+		request.ai_socktype = SOCK_STREAM;
+		request.ai_flags = AI_PASSIVE;
+		if (getaddrinfo("localhost", gdb_port, &request, &result)) {
+			fatal_error("Failed to resolve localhost:%s for GDB remote debugging\n", gdb_port);
+		}
+		int listen_sock = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+		if (listen_sock < 0) {
+			fatal_error("Failed to open GDB remote debugging socket\n");
+		}
+		int yes = 1;
+		setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+		if (bind(listen_sock, result->ai_addr, result->ai_addrlen) < 0) {
+			fatal_error("Failed to bind GDB remote debugging socket on localhost:%s\n", gdb_port);
+		}
+		freeaddrinfo(result);
+		if (listen(listen_sock, 1) < 0) {
+			fatal_error("Failed to listen on GDB remote debugging socket\n");
+		}
+		printf("Waiting for GDB connection on localhost:%s...\n", gdb_port);
+		fflush(stdout);
+		int conn = accept(listen_sock, NULL, NULL);
+		if (conn < 0) {
+			fatal_error("accept returned an error while listening on GDB remote debugging socket\n");
+		}
+		close(listen_sock);
+		dup2(conn, STDIN_FILENO);
+		dup2(conn, STDOUT_FILENO);
+		close(conn);
+	}
 	disable_stdout_messages();
 #endif
 }
