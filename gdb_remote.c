@@ -172,6 +172,49 @@ void m68k_write_byte(m68k_context * context, uint32_t address, uint8_t value)
 	}
 }
 
+// Read a longword from 68k address space. The new core exposes this via
+// backend.h's read_word(); the old core uses the VDP DMA helper.
+static uint32_t gdb_m68k_read_long(uint32_t address, m68k_context *context)
+{
+#ifdef NEW_CORE
+	return read_word(address, (void **)context->mem_pointers, &context->opts->gen, context) << 16
+	     | read_word(address + 2, (void **)context->mem_pointers, &context->opts->gen, context);
+#else
+	return (read_dma_value(address / 2) << 16) | read_dma_value(address / 2 + 1);
+#endif
+}
+
+// Single-step support. BlastEm has no hardware single-step, so to advance one
+// instruction we decode the current one, work out where it will go (sequential
+// address, branch target, or the return address on the stack for RT*), and plant
+// a temporary breakpoint there before resuming. This mirrors the internal
+// debugger's cmd_step_m68k(). Previously this prediction was #ifdef'd out for the
+// new CPU core, so 's'/'S'/vCont;s just free-ran and gdb hung waiting forever for
+// a stop reply (the classic "next leaves no (gdb) prompt").
+static void gdb_insert_step_breakpoints(m68k_context *context, uint32_t pc, debug_root *root)
+{
+	m68kinst inst;
+	uint32_t after = m68k_decode(m68k_instruction_fetch, context, &inst, pc & 0xFFFFFF);
+	if (inst.op == M68K_RTS) {
+		after = gdb_m68k_read_long(context->aregs[7], context);
+	} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
+		after = gdb_m68k_read_long(context->aregs[7] + 2, context);
+	} else if (m68k_is_branch(&inst)) {
+		if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
+			root->branch_f = after;
+			root->branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
+			insert_breakpoint(context, root->branch_t, gdb_debug_enter);
+		} else if (inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
+			root->branch_t = after;
+			root->branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
+			insert_breakpoint(context, root->branch_f, gdb_debug_enter);
+		} else {
+			after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
+		}
+	}
+	insert_breakpoint(context, after, gdb_debug_enter);
+}
+
 void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 {
 	char send_buf[512];
@@ -196,31 +239,7 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 			//TODO: implement resuming at an arbitrary address
 			goto not_impl;
 		}
-#ifndef NEW_CORE
-		m68kinst inst;
-		genesis_context *gen = context->system;
-		uint32_t after = m68k_decode(m68k_instruction_fetch, context, &inst, pc & 0xFFFFFF);
-
-		if (inst.op == M68K_RTS) {
-			after = (read_dma_value(context->aregs[7]/2) << 16) | read_dma_value(context->aregs[7]/2 + 1);
-		} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
-			after = (read_dma_value((context->aregs[7]+2)/2) << 16) | read_dma_value((context->aregs[7]+2)/2 + 1);
-		} else if(m68k_is_branch(&inst)) {
-			if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
-				root->branch_f = after;
-				root->branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-				insert_breakpoint(context, root->branch_t, gdb_debug_enter);
-			} else if(inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
-				root->branch_t = after;
-				root->branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-				insert_breakpoint(context, root->branch_f, gdb_debug_enter);
-			} else {
-				after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-			}
-		}
-		insert_breakpoint(context, after, gdb_debug_enter);
-#endif
-
+		gdb_insert_step_breakpoints(context, pc, root);
 		cont = 1;
 		expect_break_response = 1;
 		break;
@@ -455,31 +474,7 @@ void gdb_run_command(m68k_context * context, uint32_t pc, char * command)
 				break;
 			case 's':
 			case 'S': {
-#ifndef NEW_CORE
-				m68kinst inst;
-				genesis_context *gen = context->system;
-				uint32_t after = m68k_decode(m68k_instruction_fetch, context, &inst, pc & 0xFFFFFF);
-
-				if (inst.op == M68K_RTS) {
-					after = (read_dma_value(context->aregs[7]/2) << 16) | read_dma_value(context->aregs[7]/2 + 1);
-				} else if (inst.op == M68K_RTE || inst.op == M68K_RTR) {
-					after = (read_dma_value((context->aregs[7]+2)/2) << 16) | read_dma_value((context->aregs[7]+2)/2 + 1);
-				} else if(m68k_is_branch(&inst)) {
-					if (inst.op == M68K_BCC && inst.extra.cond != COND_TRUE) {
-						root->branch_f = after;
-						root->branch_t = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-						insert_breakpoint(context, root->branch_t, gdb_debug_enter);
-					} else if(inst.op == M68K_DBCC && inst.extra.cond != COND_FALSE) {
-						root->branch_t = after;
-						root->branch_f = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-						insert_breakpoint(context, root->branch_f, gdb_debug_enter);
-					} else {
-						after = m68k_branch_target(&inst, context->dregs, context->aregs) & 0xFFFFFF;
-					}
-				}
-				insert_breakpoint(context, after, gdb_debug_enter);
-#endif
-
+				gdb_insert_step_breakpoints(context, pc, root);
 				cont = 1;
 				expect_break_response = 1;
 				break;
