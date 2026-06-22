@@ -14,6 +14,12 @@ sdl
 /ztests
 generated_tests/
 html/
+# built command-line tools
+/dis
+/zdis
+/sh2dis
+/upddis
+/termhelper
 
 # Sources generated from the CPU DSL at build time
 z80.c
@@ -22,6 +28,9 @@ m68k.c
 m68k.h
 sh2.c
 sh2.h
+upd78k2.c
+upd78k2.h
+nuklear_ui/inter_medium.c
 
 # Vendored / fetched dependencies
 starscream/
