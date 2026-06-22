@@ -1,0 +1,229 @@
+name: build
+
+# Build this patched (debug-capable) BlastEm fork for every platform sgdkx uses:
+# macOS arm64/x86_64, Linux x86_64/arm64, Windows x64. Each push to main (or a
+# manual run) creates a `build-<sha>` release, marked Latest, whose asset names
+# match what sgdkx downloads (BlastEm-macOS-<arch>-*, blastem-linux-<arch>-*,
+# blastem-win64-*). Self-contained: SDL2/GLEW are bundled into each artifact.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.c'
+      - '**.h'
+      - '**.m'
+      - 'Makefile'
+      - 'nuklear_ui/**'
+      - 'version.inc'
+      - 'assets/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # Recent clang (19+) / Apple clang promote several legacy C warnings to errors.
+  # Upstream compiles cleanly on older clang, so downgrade just those back to
+  # warnings (no source changes). Harmless for gcc/mingw.
+  CWARN: '-Wno-error=incompatible-pointer-types -Wno-error=incompatible-function-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
+  CWARN_GCC: '-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-int'
+  SDL_WIN_VER: '2.30.9'
+  GLEW_WIN_VER: '2.2.0'
+
+jobs:
+  # Create (or refresh) the build-<sha> release at the current commit and mark it
+  # Latest, so `sgdkx install` (which resolves "latest") picks up the newest build.
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.mk.outputs.tag }}
+      ver: ${{ steps.mk.outputs.ver }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: mk
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --short=12 HEAD)
+          tag="build-$sha"
+          base=$(sed -E -n 's/.*BLASTEM_VERSION "([^"]+)".*/\1/p' version.inc)
+          ver="${base}-${sha}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ver=$ver" >> "$GITHUB_OUTPUT"
+          notes="Patched (debug-capable) BlastEm — GDB remote ( -D / BLASTEM_GDB_PORT ), a scriptable Unix-domain control socket ( BLASTEM_CTRL_SOCK ), and an embedded UI font. Built from ${REPO}@${sha}.
+
+          Fork changes are dedicated to the public domain (The Unlicense — see COPYING.fork); BlastEm itself is GPLv3 (see COPYING)."
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$REPO" --title "BlastEm debug-capable $sha" --notes "$notes" --latest
+          else
+            gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
+              --title "BlastEm debug-capable $sha" --notes "$notes" --latest
+          fi
+
+  # macOS: two .app bundles (arm64 + x86_64), both built on an Apple Silicon
+  # runner against universal SDL2 + GLEW compiled once from source.
+  macos:
+    needs: release
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: brew install cmake pkg-config dylibbundler
+      - name: Stamp version
+        run: sed -i '' -E 's/BLASTEM_VERSION "[^"]*"/BLASTEM_VERSION "${{ needs.release.outputs.ver }}"/' version.inc
+      - name: Build universal SDL2 + GLEW (arm64 + x86_64)
+        run: |
+          set -euo pipefail
+          UNIV="$PWD/univ"; mkdir -p "$UNIV/lib/pkgconfig"
+          ARCHS="arm64;x86_64"
+          curl -fSL -o sdl.tar.gz "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-${SDL_WIN_VER}.tar.gz"
+          mkdir sdlsrc && tar xzf sdl.tar.gz -C sdlsrc --strip-components=1
+          cmake -S sdlsrc -B sdlbuild -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="$ARCHS" -DCMAKE_INSTALL_PREFIX="$UNIV" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
+          cmake --build sdlbuild --config Release -j3
+          cmake --install sdlbuild
+          curl -fSL -o glew.tgz "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}.tgz"
+          mkdir glewsrc && tar xzf glew.tgz -C glewsrc --strip-components=1
+          # STRIP=true: skip `strip`, which rejects fat (universal) objects in a .a archive.
+          make -C glewsrc GLEW_DEST="$UNIV" 'CFLAGS.EXTRA=-arch arm64 -arch x86_64' 'LDFLAGS.EXTRA=-arch arm64 -arch x86_64' STRIP=true all
+          make -C glewsrc GLEW_DEST="$UNIV" STRIP=true install.all
+          printf 'prefix=%s\nlibdir=${prefix}/lib\nincludedir=${prefix}/include\nName: glew\nDescription: GLEW\nVersion: %s\nCflags: -I${includedir}\nLibs: -L${libdir} -lGLEW -framework OpenGL\n' \
+            "$UNIV" "${GLEW_WIN_VER}" > "$UNIV/lib/pkgconfig/glew.pc"
+          echo "UNIV=$UNIV" >> "$GITHUB_ENV"
+      - name: Build blastem + .app (arm64 and x86_64)
+        run: |
+          set -euo pipefail
+          export PKG_CONFIG_PATH="$UNIV/lib/pkgconfig"
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          cat > /tmp/Info.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>BlastEm</string>
+            <key>CFBundleDisplayName</key><string>BlastEm</string>
+            <key>CFBundleIdentifier</key><string>dev.ulalume.blastem.debug-capable</string>
+            <key>CFBundleVersion</key><string>${ver}</string>
+            <key>CFBundleShortVersionString</key><string>${ver}</string>
+            <key>CFBundleExecutable</key><string>blastem</string>
+            <key>CFBundleIconFile</key><string>BlastEm</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>LSMinimumSystemVersion</key><string>10.13</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          build_app() {
+            arch="$1"; cpu="$2"
+            rm -rf obj blastem
+            make $cpu CC="clang -arch $arch $CWARN" blastem
+            file blastem
+            APP="BlastEm.app"; rm -rf "$APP"
+            mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
+            cp blastem "$APP/Contents/MacOS/"
+            cp -R shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING COPYING.fork "$APP/Contents/MacOS/"
+            cp assets/BlastEm.icns "$APP/Contents/Resources/BlastEm.icns"
+            cp /tmp/Info.plist "$APP/Contents/Info.plist"
+            dylibbundler -od -b -x "$APP/Contents/MacOS/blastem" \
+              -d "$APP/Contents/Frameworks" -p "@executable_path/../Frameworks/" \
+              -s "$UNIV/lib" </dev/null
+            codesign --force --deep -s - "$APP" || true
+            ditto -c -k --sequesterRsrc --keepParent "$APP" "BlastEm-macOS-$arch-${ver}.zip"
+            ls -la "BlastEm-macOS-$arch-${ver}.zip"
+          }
+          build_app arm64 ""
+          build_app x86_64 "CPU=x86_64"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" BlastEm-macOS-*.zip --clobber --repo "${{ github.repository }}"
+
+  # Linux x86_64 (JIT) and arm64 (interpreter), native runners. Portable: bundle
+  # libSDL2/libGLEW next to the binary with an $ORIGIN/lib rpath.
+  linux:
+    needs: release
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 libsdl2-dev libglew-dev zlib1g-dev patchelf zip file
+      - name: Stamp version
+        run: sed -i -E 's/BLASTEM_VERSION "[^"]*"/BLASTEM_VERSION "${{ needs.release.outputs.ver }}"/' version.inc
+      - name: Build (${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          make CC="gcc $CWARN_GCC" blastem
+          file blastem
+      - name: Package (portable)
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          dir="blastem-linux-${{ matrix.arch }}-${ver}"
+          mkdir -p "$dir/lib"
+          cp blastem "$dir/"
+          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg COPYING COPYING.fork "$dir/"
+          ldd blastem | awk '/libSDL2|libGLEW/ {print $3}' | while read -r p; do
+            [ -n "$p" ] && cp -Lv "$p" "$dir/lib/"
+          done
+          patchelf --set-rpath '$ORIGIN/lib' "$dir/blastem"
+          tar czf "${dir}.tar.gz" "$dir"
+          ls -la "${dir}.tar.gz"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" blastem-linux-*.tar.gz --clobber --repo "${{ github.repository }}"
+
+  # Windows x86_64, cross-compiled with mingw-w64 (as upstream). Self-contained
+  # bundle with SDL2.dll alongside.
+  windows:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mingw + tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 python3 zip unzip wget file
+      - name: Stamp version
+        run: sed -i -E 's/BLASTEM_VERSION "[^"]*"/BLASTEM_VERSION "${{ needs.release.outputs.ver }}"/' version.inc
+      - name: Fetch Windows SDL2 + GLEW dev libraries
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_WIN_VER}/SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz"
+          mkdir sdl && tar xzf "SDL2-devel-${SDL_WIN_VER}-mingw.tar.gz" -C sdl --strip-components=1
+          wget -q "https://github.com/nigels-com/glew/releases/download/glew-${GLEW_WIN_VER}/glew-${GLEW_WIN_VER}-win32.zip"
+          unzip -q "glew-${GLEW_WIN_VER}-win32.zip"
+          mv "glew-${GLEW_WIN_VER}" glew
+      - name: Build (x86_64)
+        run: |
+          set -euo pipefail
+          make PORTABLE=1 OS=Windows CPU=x86_64 SDL=sdl2 blastem.exe
+          file blastem.exe
+      - name: Package
+        run: |
+          set -euo pipefail
+          ver=$(sed -E -n 's/^[^B]+BLASTEM_VERSION "([^"]+)"/\1/p' version.inc)
+          triple=x86_64-w64-mingw32
+          dir="blastem-win64-${ver}"
+          mkdir "$dir"
+          cp blastem.exe "$dir/"
+          cp "sdl/${triple}/bin/SDL2.dll" "$dir/"
+          cp -r shaders images default.cfg rom.db gamecontrollerdb.txt systems.cfg "$dir/"
+          cp COPYING "$dir/COPYING.txt"
+          cp COPYING.fork "$dir/COPYING.fork.txt"
+          zip -r "${dir}.zip" "$dir"
+          ls -la "${dir}.zip"
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release.outputs.tag }}" blastem-win64-*.zip --clobber --repo "${{ github.repository }}"
