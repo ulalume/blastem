@@ -1,0 +1,44 @@
+# Build artifacts
+*.o
+*.list
+*.dis
+*.zdis
+obj/
+lib/
+glew/
+sdl
+/blastem
+/blastem.exe
+/vdpreverse
+/gxz80
+/ztests
+generated_tests/
+html/
+
+# Sources generated from the CPU DSL at build time
+z80.c
+z80.h
+m68k.c
+m68k.h
+sh2.c
+sh2.h
+
+# Vendored / fetched dependencies
+starscream/
+musashi/
+nemesis/
+android/.gradle
+android/app/build
+android/app/jni/SDL
+android/local.properties
+
+# Runtime files
+*.eeprom
+*.sram
+
+# Local notes / docs (kept locally, not tracked — see ../blastem for PATCHES.md etc.)
+*.md
+
+# macOS
+.DS_Store
+*~
