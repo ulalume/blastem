@@ -24,6 +24,8 @@
 #include "io.h"
 #include "render.h"
 #include "util.h"
+#include "genesis.h"
+#include "kit_prof.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -51,6 +53,16 @@ static uint8_t parse_button(const char *name)
 		}
 	}
 	return BUTTON_INVALID;
+}
+
+// Point the profiler at the running Genesis 68K, once. Safe to call before every prof/vramhash
+// command; kit_prof_set_context only latches the first non-null context it is given.
+static void kit_prof_bind_system(void)
+{
+	if (current_system && current_system->type == SYSTEM_GENESIS) {
+		genesis_context *gen = (genesis_context *)current_system;
+		kit_prof_set_context(gen->m68k);
+	}
 }
 
 static void process_command(char *line)
@@ -95,6 +107,48 @@ static void process_command(char *line)
 			render_save_screenshot(strdup(path));
 		} else {
 			warning("ctrl_sock: expected 'screenshot <path>'\n");
+		}
+	} else if (!strcmp(cmd, "prof")) {
+		char *sub = strtok(NULL, " \t");
+		if (!sub) {
+			warning("ctrl_sock: expected 'prof <bracket|clear|log> ...'\n");
+			return;
+		}
+		kit_prof_bind_system();
+		if (!strcmp(sub, "bracket")) {
+			char *name = strtok(NULL, " \t");
+			char *start = strtok(NULL, " \t");
+			char *end = strtok(NULL, " \t");
+			if (!name || !start || !end) {
+				warning("ctrl_sock: expected 'prof bracket <name> <start_hex> <end_hex>'\n");
+				return;
+			}
+			uint32_t start_addr = (uint32_t)strtoul(start, NULL, 16);
+			uint32_t end_addr = (uint32_t)strtoul(end, NULL, 16);
+			kit_prof_add_bracket(name, start_addr, end_addr);
+		} else if (!strcmp(sub, "clear")) {
+			kit_prof_clear();
+		} else if (!strcmp(sub, "log")) {
+			char *state = strtok(NULL, " \t");
+			if (state && !strcmp(state, "on")) {
+				kit_prof_set_log(1);
+			} else if (state && !strcmp(state, "off")) {
+				kit_prof_set_log(0);
+			} else {
+				warning("ctrl_sock: expected 'prof log <on|off>'\n");
+			}
+		} else {
+			warning("ctrl_sock: unknown prof subcommand '%s'\n", sub);
+		}
+	} else if (!strcmp(cmd, "vramhash")) {
+		char *state = strtok(NULL, " \t");
+		kit_prof_bind_system();
+		if (state && !strcmp(state, "on")) {
+			kit_prof_set_vramhash(1);
+		} else if (state && !strcmp(state, "off")) {
+			kit_prof_set_vramhash(0);
+		} else {
+			warning("ctrl_sock: expected 'vramhash <on|off>'\n");
 		}
 	} else {
 		warning("ctrl_sock: unknown command '%s'\n", cmd);

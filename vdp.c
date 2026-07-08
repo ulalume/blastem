@@ -11,6 +11,7 @@
 #include "util.h"
 #include "event_log.h"
 #include "terminal.h"
+#include "kit_prof.h"
 #ifndef DISABLE_NUKLEAR
 #include "nuklear_ui/debug_ui.h"
 #endif
@@ -2923,6 +2924,7 @@ static void sprite_debug_tms(pixel_t *fb, uint32_t pitch, vdp_context *context)
 
 void vdp_update_per_frame_debug(vdp_context *context)
 {
+	kit_prof_frame(context);
 	if (context->enabled_debuggers & (1 << DEBUG_PLANE)) {
 		
 		uint32_t pitch;

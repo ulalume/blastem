@@ -23,6 +23,7 @@
 #include "config.h"
 #include "event_log.h"
 #include "paths.h"
+#include "kit_prof.h"
 #define MCLKS_NTSC 53693175
 #define MCLKS_PAL  53203395
 
@@ -627,6 +628,7 @@ static m68k_context *sync_components(m68k_context * context, uint32_t address)
 				jcart_adjust_cycles(gen, deduction);
 			}
 			context->cycles -= deduction;
+			kit_prof_rebase(deduction);
 			z80_adjust_cycles(z_context, deduction);
 			ym_adjust_cycles(gen->ym, deduction);
 			if (gen->ym->vgm) {
@@ -901,6 +903,7 @@ static m68k_context* sync_components_pico(m68k_context * context, uint32_t addre
 				jcart_adjust_cycles(gen, deduction);
 			}
 			context->cycles -= deduction;
+			kit_prof_rebase(deduction);
 			if (gen->psg->vgm) {
 				vgm_adjust_cycles(gen->psg->vgm, deduction);
 			}
