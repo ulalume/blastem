@@ -40,7 +40,53 @@ void kit_prof_frame(struct vdp_context *vdp);
 
 // Cycle-rebase hook, called from the genesis.c sync sites immediately where the shared MCLK
 // cycle counter has "deduction" subtracted from it. Re-aligns any saved absolute cycle snapshots
-// (per-frame anchor + live bracket starts) so measurements spanning a rebase stay correct.
+// (per-frame anchor + live bracket starts + HUD idle/window snapshots) so measurements spanning a
+// rebase stay correct.
 void kit_prof_rebase(uint32_t deduction);
+
+// ---------------------------------------------------------------------------
+// FEATURE A: HUD (Game FPS + CPU%) -- see PATCHES.md.
+// Driven over the control socket ("hud ..."). All measurement is host-side: PC sampling and
+// breakpoints never change the emulated cycle counter, so enabling the HUD cannot perturb output.
+// ---------------------------------------------------------------------------
+
+// Master switch. kit_hud_on() defaults idle accounting to auto-discovery when no idle mode was
+// explicitly chosen. kit_hud_off() clears the HUD title suffix and removes the idle/marker breakpoints.
+void kit_hud_on(void);
+void kit_hud_off(void);
+
+// Optional exact game-frame marker: a PC executed exactly once per main-loop iteration. Pass 0 to
+// clear the marker (fall back to the gap heuristic).
+void kit_hud_set_gamefps(uint32_t addr);
+
+// Idle-loop address selection. Manual pins one address; auto continuously PC-samples and re-arms.
+void kit_hud_set_idle_manual(uint32_t addr);
+void kit_hud_set_idle_auto(void);
+
+// Obsolete (the spin-frame heuristic needs no threshold); accepted and ignored with a warning.
+void kit_hud_set_fpsgap(uint32_t cycles68k);
+
+// Once-per-scanline hook (vdp.c advance_output_line): rotating-line PC sampling for the auto
+// idle detector — time-weighted, unlike frame-push-moment sampling which lands in the vint
+// handler. Cheap early-outs when the HUD/auto mode is off.
+void kit_prof_scanline(struct vdp_context *vdp);
+
+// Current HUD title suffix ("Game 8.5 fps / CPU 92%"), or "" when the HUD is off. Read from the
+// SDL render thread at the caption-refresh site.
+const char *kit_prof_hud_text(void);
+
+// ---------------------------------------------------------------------------
+// FEATURE B: watchlog (cycle-stamped RAM write logging) -- NEW_CORE interpreter only.
+// ---------------------------------------------------------------------------
+
+// Number of armed watchpoints. Read directly (cheap guard) by the interpreter write path in
+// m68k_util.c: `if (kit_watch_count) kit_watch_check(...)`. Zero when nothing is watched.
+extern uint32_t kit_watch_count;
+
+// Add/remove watched byte addresses (up to 8). kit_watch_check() is the write-path hook: it emits a
+// KIT WATCH line when [addr, addr+size) covers any watched byte.
+void kit_watch_add(uint32_t addr);
+void kit_watch_clear(void);
+void kit_watch_check(struct m68k_context *context, uint32_t addr, uint32_t val, uint8_t size);
 
 #endif //KIT_PROF_H_

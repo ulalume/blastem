@@ -13,6 +13,7 @@
 #include "genesis.h"
 #include "bindings.h"
 #include "ctrl_fifo.h"
+#include "kit_prof.h"
 #include "util.h"
 #include "paths.h"
 #include "ppm.h"
@@ -2384,10 +2385,17 @@ static void process_framebuffer(pixel_t *buffer, uint8_t which, int width)
 	#ifdef __ANDROID__
 				debug_message("%s - %.1f fps", caption, ((float)frame_counter) / (((float)(last_frame-start)) / 1000.0));
 	#else
+				// +128 headroom for the genesis-kit HUD suffix (" | Game .. fps / CPU ..%")
 				if (!fps_caption) {
-					fps_caption = malloc(strlen(caption) + strlen(" - 100000000.1 fps") + 1);
+					fps_caption = malloc(strlen(caption) + strlen(" - 100000000.1 fps") + 128);
 				}
-				sprintf(fps_caption, "%s - %.1f fps", caption, ((float)frame_counter) / (((float)(last_frame-start)) / 1000.0));
+				float fps = ((float)frame_counter) / (((float)(last_frame-start)) / 1000.0);
+				const char *hud = kit_prof_hud_text();
+				if (hud[0]) {
+					sprintf(fps_caption, "%s - %.1f fps | %s", caption, fps, hud);
+				} else {
+					sprintf(fps_caption, "%s - %.1f fps", caption, fps);
+				}
 				SDL_SetWindowTitle(main_window, fps_caption);
 	#endif
 			}

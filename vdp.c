@@ -3047,6 +3047,7 @@ void vdp_force_update_framebuffer(vdp_context *context)
 
 static void advance_output_line(vdp_context *context)
 {
+	kit_prof_scanline(context); // rotating-line PC sample for the HUD idle detector (cheap early-out)
 	//This function is kind of gross because of the need to deal with vertical border busting via mode changes
 	uint16_t lines_max = context->inactive_start + context->border_bot + context->border_top;
 	uint32_t output_line = context->vcounter;

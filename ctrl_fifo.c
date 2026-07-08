@@ -150,6 +150,64 @@ static void process_command(char *line)
 		} else {
 			warning("ctrl_sock: expected 'vramhash <on|off>'\n");
 		}
+	} else if (!strcmp(cmd, "hud")) {
+		char *sub = strtok(NULL, " \t");
+		kit_prof_bind_system();
+		if (!sub) {
+			warning("ctrl_sock: expected 'hud <on|off|gamefps|idle|fpsgap> ...'\n");
+			return;
+		}
+		if (!strcmp(sub, "on")) {
+			kit_hud_on();
+		} else if (!strcmp(sub, "off")) {
+			kit_hud_off();
+		} else if (!strcmp(sub, "gamefps")) {
+			char *addr = strtok(NULL, " \t");
+			if (!addr) {
+				warning("ctrl_sock: expected 'hud gamefps <addr_hex>'\n");
+				return;
+			}
+			kit_hud_set_gamefps((uint32_t)strtoul(addr, NULL, 16));
+		} else if (!strcmp(sub, "idle")) {
+			char *arg = strtok(NULL, " \t");
+			if (!arg) {
+				warning("ctrl_sock: expected 'hud idle <addr_hex|auto>'\n");
+				return;
+			}
+			if (!strcmp(arg, "auto")) {
+				kit_hud_set_idle_auto();
+			} else {
+				kit_hud_set_idle_manual((uint32_t)strtoul(arg, NULL, 16));
+			}
+		} else if (!strcmp(sub, "fpsgap")) {
+			char *cyc = strtok(NULL, " \t");
+			if (!cyc) {
+				warning("ctrl_sock: expected 'hud fpsgap <cycles>'\n");
+				return;
+			}
+			kit_hud_set_fpsgap((uint32_t)strtoul(cyc, NULL, 10));
+		} else {
+			warning("ctrl_sock: unknown hud subcommand '%s'\n", sub);
+		}
+	} else if (!strcmp(cmd, "watchlog")) {
+#ifdef NEW_CORE
+		char *sub = strtok(NULL, " \t");
+		kit_prof_bind_system();
+		if (sub && !strcmp(sub, "add")) {
+			char *addr = strtok(NULL, " \t");
+			if (!addr) {
+				warning("ctrl_sock: expected 'watchlog add <addr_hex>'\n");
+				return;
+			}
+			kit_watch_add((uint32_t)strtoul(addr, NULL, 16));
+		} else if (sub && !strcmp(sub, "clear")) {
+			kit_watch_clear();
+		} else {
+			warning("ctrl_sock: expected 'watchlog <add <addr_hex>|clear>'\n");
+		}
+#else
+		warning("watchlog: unsupported on the JIT core build\n");
+#endif
 	} else {
 		warning("ctrl_sock: unknown command '%s'\n", cmd);
 	}

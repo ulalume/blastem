@@ -1,4 +1,5 @@
 #include <string.h>
+#include "kit_prof.h" // watchlog write-path hook (kit_watch_count / kit_watch_check)
 #ifdef DEBUG_DISASM
 #include "68kinst.h"
 #endif
@@ -54,6 +55,9 @@ void m68k_write_8(m68k_context *context)
 	uint32_t address = context->scratch2 & context->opts->gen.address_mask;
 	uint32_t index = address >> 16;
 	context->write8[index](address, context, context->scratch1, context->write8_data[index]);
+	if (kit_watch_count) {
+		kit_watch_check(context, address, context->scratch1, 1);
+	}
 #ifdef DEBUG_DISASM
 	printf("Write.b %05X: %02X\n", context->scratch2, context->scratch1);
 #endif
@@ -74,6 +78,9 @@ void m68k_write_16(m68k_context *context)
 	int32_t address = context->scratch2 & context->opts->gen.address_mask;
 	uint32_t index = address >> 16;
 	context->write16[index](address, context, context->scratch1, context->write16_data[index]);
+	if (kit_watch_count) {
+		kit_watch_check(context, address, context->scratch1, 2);
+	}
 #ifdef DEBUG_DISASM
 	printf("Write %05X: %04X\n", context->scratch2, context->scratch1);
 #endif
