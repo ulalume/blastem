@@ -80,6 +80,16 @@ static uint32_t marker_hits;         // marker breakpoint hits this window
 
 static uint32_t idle_gap_max_mclk;   // HUD_IDLE_GAP_68K * divider (MCLK, precomputed)
 
+// Tier-3 Game-FPS fallback: VRAM-change rate. Used ONLY when there is neither a marker nor an
+// armed idle loop (i.e. a game that never waits, like a heavy renderer at CPU 100%) — for such a
+// game "the screen changed" ≈ "a frame was rendered". Games that DO wait are handled by the more
+// accurate spin-frame tier first, which is what makes the old "pause screen reads 0fps" flaw of
+// pure VRAM-counting structurally impossible here (a paused game waits -> spin tier answers).
+// Remaining honest limit: CPU-100% + genuinely static output reads low (hence the ~ prefix).
+static uint32_t vchange_prev_hash;
+static uint8_t  have_vchange_prev;
+static uint32_t vchange_count; // VRAM/CRAM/VSRAM changes seen this window
+
 // Rotating-scanline PC sampling (auto idle detection). Sampling at the frame-push moment is
 // systematically biased INTO the vint handler (the push happens a few lines after vint while the
 // handler is still running — observed: an idle menu "detected" JOY_update). Instead we sample once
@@ -244,10 +254,10 @@ static uint32_t fnv1a(uint32_t hash, const uint8_t *data, uint32_t len)
 	return hash;
 }
 
-static void emit_vramhash(struct vdp_context *vdp)
+// FNV-1a 32-bit over: vdpmem[0..VRAM_SIZE) bytes, then each cram[0..CRAM_SIZE) word
+// (low byte then high byte), then each vsram[0..MAX_VSRAM_SIZE) word (low then high).
+static uint32_t compute_vramhash(struct vdp_context *vdp)
 {
-	// FNV-1a 32-bit over: vdpmem[0..VRAM_SIZE) bytes, then each cram[0..CRAM_SIZE) word
-	// (low byte then high byte), then each vsram[0..MAX_VSRAM_SIZE) word (low then high).
 	uint32_t hash = 2166136261u;
 	hash = fnv1a(hash, vdp->vdpmem, VRAM_SIZE);
 	for (uint32_t i = 0; i < CRAM_SIZE; i++) {
@@ -260,8 +270,13 @@ static void emit_vramhash(struct vdp_context *vdp)
 		uint8_t bytes[2] = { (uint8_t)(w & 0xFF), (uint8_t)(w >> 8) };
 		hash = fnv1a(hash, bytes, 2);
 	}
+	return hash;
+}
+
+static void emit_vramhash(struct vdp_context *vdp)
+{
 	char line[64];
-	snprintf(line, sizeof(line), "KIT VHASH frame=%u hash=%08x", vdp->frame, hash);
+	snprintf(line, sizeof(line), "KIT VHASH frame=%u hash=%08x", vdp->frame, compute_vramhash(vdp));
 	kit_emit_line(line);
 }
 
@@ -421,13 +436,21 @@ static void kit_hud_rollup(uint32_t frame)
 	// 0.0 would be a lie; show "--" instead.
 	uint8_t heuristic = 0, have_fps = 1;
 	uint32_t count = 0;
+	const char *src;
 	if (hud_marker_armed) {
 		count = marker_hits;
+		src = "marker";
 	} else if (hud_idle_armed) {
 		count = heuristic_frame_count;
 		heuristic = 1;
+		src = "gap";
+	} else if (have_vchange_prev) {
+		count = vchange_count; // tier-3: VRAM-change rate (never-waiting game)
+		heuristic = 1;
+		src = "vchange";
 	} else {
 		have_fps = 0;
+		src = "none";
 	}
 	float game_fps = have_fps ? (float)count * (float)HUD_WINDOW_FRAMES / (float)frames : -1.0f;
 
@@ -448,7 +471,6 @@ static void kit_hud_rollup(uint32_t frame)
 		cpu_pct = 100; // no idle loop armed -> treat as fully busy
 	}
 
-	const char *src = hud_marker_armed ? "marker" : (hud_idle_armed ? "gap" : "none");
 	char idlebuf[16];
 	const char *idle_field;
 	if (hud_idle_armed) {
@@ -480,6 +502,7 @@ static void kit_hud_rollup(uint32_t frame)
 	idle_accum = 0;
 	heuristic_frame_count = 0;
 	marker_hits = 0;
+	vchange_count = 0;
 	hud_window_frames = 0;
 	if (prof_m68k) {
 		hud_window_start_cycle = prof_m68k->cycles;
@@ -487,13 +510,23 @@ static void kit_hud_rollup(uint32_t frame)
 	}
 }
 
-static void kit_hud_frame(uint32_t frame)
+static void kit_hud_frame(struct vdp_context *vdp)
 {
+	uint32_t frame = vdp->frame;
 	// PC sampling moved to kit_prof_scanline() (rotating target line) — sampling here, at the
 	// frame-push moment, was systematically biased into the vint handler.
 	if (idle_spun_this_frame) {
 		heuristic_frame_count++; // spin-frame FPS fallback: this vblank period saw real waiting
 		idle_spun_this_frame = 0;
+	}
+	// Tier-3 fallback (see vchange_count): only when neither better source exists.
+	if (!hud_marker_armed && !hud_idle_armed) {
+		uint32_t h = compute_vramhash(vdp);
+		if (have_vchange_prev && h != vchange_prev_hash) {
+			vchange_count++;
+		}
+		vchange_prev_hash = h;
+		have_vchange_prev = 1;
 	}
 	hud_window_frames++;
 	if (hud_window_frames >= HUD_WINDOW_FRAMES) {
@@ -524,6 +557,7 @@ void kit_hud_on(void)
 	idle_accum = 0;
 	heuristic_frame_count = 0;
 	marker_hits = 0;
+	vchange_count = 0;
 	hud_window_frames = 0;
 	have_last_idle_hit = 0;
 	if (prof_m68k) {
@@ -657,7 +691,7 @@ void kit_prof_frame(struct vdp_context *vdp)
 	kit_watch_suppressed = 0;
 
 	if (hud_enabled) {
-		kit_hud_frame(vdp->frame);
+		kit_hud_frame(vdp);
 	}
 
 	if (vramhash_enabled) {
