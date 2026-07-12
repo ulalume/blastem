@@ -89,4 +89,16 @@ void kit_watch_add(uint32_t addr);
 void kit_watch_clear(void);
 void kit_watch_check(struct m68k_context *context, uint32_t addr, uint32_t val, uint8_t size);
 
+// ---------------------------------------------------------------------------
+// FEATURE C: vramdump (one-shot binary VRAM/CRAM/VSRAM/regs snapshot).
+// ---------------------------------------------------------------------------
+
+// Arm a one-shot dump: at the next frame boundary (see kit_prof_frame), write a KITVDMP1 binary
+// snapshot to <path> (see the format comment above kit_prof_do_vramdump() in kit_prof.c) and emit
+// "KIT VDUMP frame=<N> file=<path>". Async: this call only records the request and returns
+// immediately; the file appears within a frame. A null/empty path cancels any pending dump. A
+// second call before the pending dump is serviced replaces the path (only the latest one fires).
+// Zero cost when never called: kit_prof_frame's pending check is a single null-pointer test.
+void kit_prof_request_vramdump(const char *path);
+
 #endif //KIT_PROF_H_

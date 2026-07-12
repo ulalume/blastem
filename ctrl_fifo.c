@@ -6,6 +6,8 @@
 //   pad <num> down <button>   press a pad button (num matches the gamepad
 //   pad <num> up <button>     number in the io config, normally 1 or 2)
 //   screenshot <path>         save the next rendered frame (.png or .ppm)
+//   vramdump <path>           dump a binary VRAM/CRAM/VSRAM/regs snapshot at the next frame
+//                             boundary (KITVDMP1 format; see kit_prof.c for the file layout)
 //
 // Buttons: up down left right a b c x y z start mode
 //
@@ -139,6 +141,17 @@ static void process_command(char *line)
 			}
 		} else {
 			warning("ctrl_sock: unknown prof subcommand '%s'\n", sub);
+		}
+	} else if (!strcmp(cmd, "vramdump")) {
+		char *path = strtok(NULL, "");
+		while (path && (*path == ' ' || *path == '\t')) {
+			path++;
+		}
+		if (path && *path) {
+			kit_prof_bind_system();
+			kit_prof_request_vramdump(path);
+		} else {
+			warning("ctrl_sock: expected 'vramdump <path>'\n");
 		}
 	} else if (!strcmp(cmd, "vramhash")) {
 		char *state = strtok(NULL, " \t");

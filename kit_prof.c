@@ -3,6 +3,7 @@
 // emulator state without ever writing it back, so it cannot change emulated results.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "kit_prof.h"
@@ -673,6 +674,124 @@ void kit_watch_check(struct m68k_context *context, uint32_t addr, uint32_t val, 
 	}
 }
 
+// ===========================================================================
+// FEATURE C: vramdump -- one-shot binary VRAM/CRAM/VSRAM/regs snapshot.
+// ===========================================================================
+//
+// Binary file format ("KITVDMP1"), all multi-byte fields little-endian:
+//
+//   offset  size            field
+//   0       8                magic "KITVDMP1" (no trailing NUL)
+//   8       4 (u32)           vram_size    -- VRAM_SIZE (vdp.h); bytes of VRAM that follow
+//   12      4 (u32)           cram_count   -- CRAM_SIZE (vdp.h); u16 CRAM entries that follow
+//   16      4 (u32)           vsram_count  -- MAX_VSRAM_SIZE (vdp.h); u16 VSRAM entries that follow
+//   20      4 (u32)           reg_count    -- VDP_REGS (vdp.h); u8 register bytes that follow
+//   24      vram_size         VRAM bytes, verbatim (vdp->vdpmem[0 .. vram_size))
+//   ...     cram_count*2      CRAM entries, u16 LE each, RAW as stored (vdp->cram[]; see below)
+//   ...     vsram_count*2     VSRAM entries, u16 LE each, RAW as stored (vdp->vsram[])
+//   ...     reg_count         VDP registers, u8 each (vdp->regs[])
+//
+// CRAM raw -> 9-bit 0x0BGR: write_cram_internal() (vdp.c) stores the 16-bit word exactly as
+// written to the CRAM port, unmasked (in Mode 5; Mode 4 writes are pre-expanded to the same
+// layout). The hardware layout is 0000 BBB0 GGG0 RRR0 -- bits 1-3 RED, bits 5-7 GREEN, bits 9-11
+// BLUE -- so the classic 9-bit "0x0BGR" colour word (the value SGDK palettes use, e.g. 0x0E00 =
+// full blue, 0x000E = full red, 0x0EEE = white) is recovered by simply masking the don't-care bits:
+//   uint16_t bgr9 = raw & CRAM_BITS;   // CRAM_BITS == 0x0EEE (vdp.h)
+// or, as separate 3-bit components (each nibble holds its component in bits 3-1, so nibble
+// values are the even 0x0,0x2,..,0xE):
+//   uint8_t red   = (bgr9 >> 1) & 0x7;
+//   uint8_t green = (bgr9 >> 5) & 0x7;
+//   uint8_t blue  = (bgr9 >> 9) & 0x7;
+//
+// This mirrors compute_vramhash() exactly, buffer-for-buffer and byte-for-byte (VRAM, then each
+// CRAM word low-byte-then-high-byte, then each VSRAM word low-byte-then-high-byte): an FNV-1a hash
+// recomputed over this dump's VRAM+CRAM+VSRAM bytes, in file order, must equal the KIT VHASH value
+// logged for the same frame number. Note vsram_count is always MAX_VSRAM_SIZE (64), the full
+// backing array compute_vramhash() hashes -- not vdp->vsram_size (the hardware-visible count, 40
+// or 64 depending on region/model) -- so the dump stays bit-faithful to the hash even though a few
+// trailing VSRAM entries may be unused by hardware in 40-word mode. Regs are NOT part of the hash
+// (compute_vramhash never reads them); they are included here for plane/scroll/table decoding.
+#define KIT_VDUMP_MAGIC "KITVDMP1"
+#define KIT_VDUMP_MAGIC_LEN 8
+
+static char *vramdump_pending_path;
+
+void kit_prof_request_vramdump(const char *path)
+{
+	free(vramdump_pending_path);
+	vramdump_pending_path = (path && *path) ? strdup(path) : NULL;
+}
+
+static uint8_t kit_vdump_write_u32le(FILE *f, uint32_t v)
+{
+	uint8_t b[4] = { (uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24) };
+	return fwrite(b, 1, sizeof(b), f) == sizeof(b);
+}
+
+static uint8_t kit_vdump_write_u16le(FILE *f, uint16_t v)
+{
+	uint8_t b[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
+	return fwrite(b, 1, sizeof(b), f) == sizeof(b);
+}
+
+// Write the KITVDMP1 snapshot for `vdp` to `path`, via a `<path>.tmp` + rename so a concurrently
+// polling watcher never observes a partial file. Called only from kit_prof_frame(), i.e. at a
+// frame boundary, so the snapshot is tear-free and coherent with the KIT VHASH for the same frame.
+static void kit_prof_do_vramdump(struct vdp_context *vdp, const char *path)
+{
+	char tmp_path[1200];
+	int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+	if (n <= 0 || n >= (int)sizeof(tmp_path)) {
+		warning("kit_prof: vramdump path too long, ignoring '%s'\n", path);
+		return;
+	}
+	FILE *f = fopen(tmp_path, "wb");
+	if (!f) {
+		warning("kit_prof: vramdump failed to open '%s' for writing\n", tmp_path);
+		return;
+	}
+
+	const uint32_t vram_size = VRAM_SIZE;
+	const uint32_t cram_count = CRAM_SIZE;
+	const uint32_t vsram_count = MAX_VSRAM_SIZE;
+	const uint32_t reg_count = VDP_REGS;
+
+	uint8_t ok = 1;
+	ok = ok && fwrite(KIT_VDUMP_MAGIC, 1, KIT_VDUMP_MAGIC_LEN, f) == KIT_VDUMP_MAGIC_LEN;
+	ok = ok && kit_vdump_write_u32le(f, vram_size);
+	ok = ok && kit_vdump_write_u32le(f, cram_count);
+	ok = ok && kit_vdump_write_u32le(f, vsram_count);
+	ok = ok && kit_vdump_write_u32le(f, reg_count);
+	ok = ok && fwrite(vdp->vdpmem, 1, vram_size, f) == vram_size;
+	for (uint32_t i = 0; i < cram_count && ok; i++) {
+		ok = kit_vdump_write_u16le(f, vdp->cram[i]);
+	}
+	for (uint32_t i = 0; i < vsram_count && ok; i++) {
+		ok = kit_vdump_write_u16le(f, vdp->vsram[i]);
+	}
+	ok = ok && fwrite(vdp->regs, 1, reg_count, f) == reg_count;
+
+	if (fclose(f) != 0) {
+		ok = 0;
+	}
+	if (!ok) {
+		warning("kit_prof: vramdump write error for '%s'\n", tmp_path);
+		remove(tmp_path);
+		return;
+	}
+#ifdef _WIN32
+	remove(path); // Windows rename() does not overwrite an existing destination file
+#endif
+	if (rename(tmp_path, path) != 0) {
+		warning("kit_prof: vramdump rename '%s' -> '%s' failed\n", tmp_path, path);
+		remove(tmp_path);
+		return;
+	}
+	char line[1200];
+	snprintf(line, sizeof(line), "KIT VDUMP frame=%u file=%s", vdp->frame, path);
+	kit_emit_line(line);
+}
+
 void kit_prof_frame(struct vdp_context *vdp)
 {
 	if (vdp->frame == kit_last_frame) {
@@ -696,6 +815,16 @@ void kit_prof_frame(struct vdp_context *vdp)
 
 	if (vramhash_enabled) {
 		emit_vramhash(vdp);
+	}
+
+	// Zero cost when unused: a single non-null check. Take the dump here (same vdp context
+	// compute_vramhash()/emit_vramhash() just used above) so it lands at this frame boundary,
+	// coherent with whatever KIT VHASH was (or would be) logged for this same frame number.
+	if (vramdump_pending_path) {
+		char *path = vramdump_pending_path;
+		vramdump_pending_path = NULL;
+		kit_prof_do_vramdump(vdp, path);
+		free(path);
 	}
 
 	// Profiler bookkeeping runs whenever brackets exist (so the anchor stays fresh and the
