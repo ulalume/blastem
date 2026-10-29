@@ -27,9 +27,11 @@ env:
   GLEW_WIN_VER: '2.2.0'
 
 jobs:
-  # Create (or refresh) the release at the current commit and mark it Latest, so
-  # `sgdkx install` (which resolves "latest") picks up the newest build. A tag
-  # push releases under that tag; a manual run still uses build-<sha>.
+  # Create (or refresh) the release at the current commit as a draft. The publish
+  # job at the end makes it public and marks it Latest once every platform has
+  # uploaded its assets, so `sgdkx install` (which resolves "latest") never gets a
+  # release with missing builds. A tag push releases under that tag; a manual run
+  # still uses build-<sha>.
   release:
     runs-on: ubuntu-latest
     outputs:
@@ -58,10 +60,10 @@ jobs:
 
           Fork changes are dedicated to the public domain (The Unlicense — see COPYING.fork); BlastEm itself is GPLv3 (see COPYING)."
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-            gh release edit "$tag" --repo "$REPO" --title "BlastEm debug-capable $sha" --notes "$notes" --latest
+            gh release edit "$tag" --repo "$REPO" --title "BlastEm debug-capable $sha" --notes "$notes"
           else
             gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "BlastEm debug-capable $sha" --notes "$notes" --latest
+              --title "BlastEm debug-capable $sha" --notes "$notes" --draft
           fi
 
   # macOS: two .app bundles (arm64 + x86_64), both built on an Apple Silicon
@@ -230,3 +232,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release.outputs.tag }}" blastem-win64-*.zip --clobber --repo "${{ github.repository }}"
+
+  # Publish the release and mark it Latest only after every platform succeeded.
+  publish:
+    needs: [release, macos, linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish and mark Latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${{ needs.release.outputs.tag }}" --draft=false --latest --repo "${{ github.repository }}"
