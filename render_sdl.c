@@ -1332,6 +1332,14 @@ static void window_setup(void)
 	if (is_fullscreen) {
 		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
 	}
+	// BLASTEM_HIDDEN_WINDOW=1 creates the window hidden. Automated runs (genesis-kit)
+	// drive the emulator through the control socket and save screenshots from the
+	// frame buffer, so they never need to see it. SDL_MAC_BACKGROUND_APP alone only
+	// keeps the focus: the window still opens above the other apps' windows.
+	const char *hidden = getenv("BLASTEM_HIDDEN_WINDOW");
+	if (hidden && *hidden && strcmp(hidden, "0")) {
+		flags |= SDL_WINDOW_HIDDEN;
+	}
 	update_cursor();
 
 	tern_val def = {.ptrval = "audio"};
