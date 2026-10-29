@@ -6,13 +6,6 @@ name: build
 # asset names match what sgdkx downloads (BlastEm-macOS-<arch>-*,
 # blastem-linux-<arch>-*, blastem-win64-*). Self-contained: SDL2/GLEW are bundled
 # into each artifact.
-#
-# This used to run on every push to main. It no longer does, because the macos-14
-# leg costs real money — macOS runner minutes are billed even though this repo is
-# public, and one full build is ~29 min (~$2). Releasing on a tag also keeps the
-# invariant sgdkx depends on: whatever is marked Latest always has assets for all
-# three platforms. Gating only the macOS job would have published Latest releases
-# with no macOS build in them.
 
 on:
   push:
@@ -75,7 +68,7 @@ jobs:
   # runner against universal SDL2 + GLEW compiled once from source.
   macos:
     needs: release
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
