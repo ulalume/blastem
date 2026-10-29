@@ -731,18 +731,21 @@ static void update_mem_map(uint32_t location, sms_context *sms, uint8_t value)
 	void *old_value;
 	if (location) {
 		uint32_t idx = sms->header.info.mapper_start_index + location - 1;
-		old_value = z80->mem_pointers[idx];
-		z80->mem_pointers[idx] = sms->rom + (value << 14 & (sms->rom_size-1));
-		if (old_value != z80->mem_pointers[idx]) {
-			//invalidate any code we translated for the relevant bank
-			z80_invalidate_code_range(z80, idx ? idx * 0x4000 : 0x400, idx * 0x4000 + 0x4000);
+		if (location != 3 || !(sms->bank_regs[0] & 8)) {
+			//only update bank 2 location if RAM is not enabled
+			old_value = z80->mem_pointers[idx];
+			z80->mem_pointers[idx] = sms->rom + (value << 14 & (sms->rom_size-1));
+			if (old_value != z80->mem_pointers[idx]) {
+				//invalidate any code we translated for the relevant bank
+				z80_invalidate_code_range(z80, idx ? idx * 0x4000 : 0x400, idx * 0x4000 + 0x4000);
+			}
 		}
 	} else {
 		uint32_t idx = sms->header.info.mapper_start_index + 2;
 		old_value = z80->mem_pointers[idx];
 		if (value & 8) {
 			//cartridge RAM is enabled
-			z80->mem_pointers[idx] = sms->cart_ram + (value & 4 ? (SMS_CART_RAM_SIZE/2) : 0);
+			z80->mem_pointers[idx] = sms->cart_ram + ((value & 4) ? (SMS_CART_RAM_SIZE/2) : 0);
 		} else {
 			//cartridge RAM is disabled
 			z80->mem_pointers[idx] = sms->rom + (sms->bank_regs[3] << 14 & (sms->rom_size-1));
@@ -828,17 +831,45 @@ static uint8_t gg_io_read(uint32_t location, void *vcontext)
 {
 	z80_context *z80 = vcontext;
 	sms_context *sms = z80->system;
-	if (!location) {
+	switch (location)
+	{
+	case 0:
 		return sms->start_button_region;
-	} else {
-		//TODO: implement link port
-		return 0xFF;
+	case 1:
+		return io_data_read(sms->io.ports + 1, z80->Z80_CYCLE);
+	case 2:
+		return sms->io.ports[1].control;
+	case 3:
+		return sms->io.ports[1].serial_out;
+	case 4:
+		return io_rx_read(sms->io.ports + 1, z80->Z80_CYCLE);
+	case 5:
+		return io_sctrl_read(sms->io.ports + 1, z80->Z80_CYCLE);
 	}
+	return 0xFF;
 }
 
 static void *gg_io_write(uint32_t location, void *vcontext, uint8_t value)
 {
-	//TODO: implement link port
+	z80_context *z80 = vcontext;
+	sms_context *sms = z80->system;
+	switch (location)
+	{
+	case 1:
+		io_data_write(sms->io.ports + 1, value, z80->Z80_CYCLE);
+		break;
+	case 2:
+		io_control_write(sms->io.ports + 1, value, z80->Z80_CYCLE);
+		break;
+	case 3:
+		io_tx_write(sms->io.ports + 1, value, z80->Z80_CYCLE);
+		break;
+	case 4:
+		//receive register is not writable
+		break;
+	case 5:
+		io_sctrl_write(sms->io.ports + 1, value, z80->Z80_CYCLE);
+	}
 	return vcontext;
 }
 static void *psg_pan_write(uint32_t location, void *vcontext, uint8_t value)
