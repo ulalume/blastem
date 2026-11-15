@@ -3034,6 +3034,92 @@ void vdp_update_per_frame_debug(vdp_context *context)
 	}
 }
 
+enum {
+	LINE_MODE_NONE,
+	LINE_MODE_H32,
+	LINE_MODE_H40,
+	LINE_MODE_WIDE //an H32 row already stretched to the H40 layout by an earlier push of this frame
+};
+
+//BLASTEM_MIXED_WIDTH: 0 = push a frame with mixed H32 and H40 lines at its majority width (H40 lines get cropped or
+//H32 lines get padded), 1 (default) = stretch its H32 lines to the H40 width with nearest-neighbour pixels (4 -> 5),
+//2 = the same with blended pixels
+static uint8_t mixed_width_mode(void)
+{
+	static int8_t mode = -1;
+	if (mode < 0) {
+		char *env = getenv("BLASTEM_MIXED_WIDTH");
+		mode = env && *env ? atoi(env) : 1;
+		if (mode < 0 || mode > 2) {
+			mode = 1;
+		}
+	}
+	return mode;
+}
+
+static void record_line_mode(vdp_context *context)
+{
+	if (!context->output || !context->fb || context->s32x_vid) {
+		return;
+	}
+	uint32_t row = ((char *)context->output - (char *)context->fb) / context->output_pitch;
+	if (row >= sizeof(context->line_mode)) {
+		return;
+	}
+	uint8_t is_h40 = (context->regs[REG_MODE_4] & BIT_H40) && (context->regs[REG_MODE_2] & BIT_MODE_5);
+	if (context->line_mode[row] == LINE_MODE_NONE) {
+		context->mixed_lines[is_h40]++;
+	}
+	context->line_mode[row] = is_h40 ? LINE_MODE_H40 : LINE_MODE_H32;
+}
+
+//stretches an H32 row in place to the H40 layout: the left border stays, the 256 active pixels become 320, the right
+//border moves to the end of the H40 line (the borders keep their H32 pixel size)
+static void stretch_h32_line(pixel_t *line, uint8_t blend)
+{
+	memmove(line + BORDER_LEFT + 320, line + BORDER_LEFT + 256, BORDER_RIGHT * sizeof(pixel_t));
+	pixel_t *active = line + BORDER_LEFT;
+	//right to left: the source pixel (x * 4 / 5) is never to the right of the one written
+	for (int x = 319; x >= 0; x--)
+	{
+		uint32_t pos = x * 0x40000 / 5;
+		uint32_t base = pos >> 16;
+		uint32_t mix = pos & 0xFFFF;
+		if (blend && mix >= 0x1000 && base < 255) {
+			active[x] = mix > 0xE000 ? active[base + 1] : mix_colors(active[base], active[base + 1], mix);
+		} else {
+			active[x] = active[base];
+		}
+	}
+}
+
+//pushes the current frame; majority_lines is the line count the H40 line count is compared against to pick the width
+//of a frame that has only one mode
+static void push_framebuffer(vdp_context *context, uint16_t majority_lines)
+{
+	int width = context->h40_lines > majority_lines / 2 ? LINEBUF_SIZE : (256+HORIZ_BORDER);
+	uint8_t mode = mixed_width_mode();
+	if (mode && context->fb && !context->s32x_vid && context->mixed_lines[0] && context->mixed_lines[1]) {
+		for (uint32_t row = 0; row < sizeof(context->line_mode); row++)
+		{
+			if (context->line_mode[row] == LINE_MODE_H32) {
+				stretch_h32_line((pixel_t *)(((char *)context->fb) + context->output_pitch * row), mode == 2);
+				context->line_mode[row] = LINE_MODE_WIDE;
+			}
+		}
+		width = LINEBUF_SIZE;
+	}
+	render_framebuffer_updated(context->cur_buffer, width);
+}
+
+static void reset_line_modes(vdp_context *context)
+{
+	if (context->mixed_lines[0] || context->mixed_lines[1]) {
+		memset(context->line_mode, LINE_MODE_NONE, sizeof(context->line_mode));
+		context->mixed_lines[0] = context->mixed_lines[1] = 0;
+	}
+}
+
 void vdp_force_update_framebuffer(vdp_context *context)
 {
 	if (!context->fb) {
@@ -3047,7 +3133,8 @@ void vdp_force_update_framebuffer(vdp_context *context)
 		0,
 		to_fill * context->output_pitch
 	);
-	render_framebuffer_updated(context->cur_buffer, context->h40_lines > context->output_lines / 2 ? LINEBUF_SIZE : (256+HORIZ_BORDER));
+	push_framebuffer(context, context->output_lines);
+	reset_line_modes(context);
 	context->fb = render_get_framebuffer(context->cur_buffer, &context->output_pitch);
 	vdp_update_per_frame_debug(context);
 }
@@ -3055,6 +3142,7 @@ void vdp_force_update_framebuffer(vdp_context *context)
 static void advance_output_line(vdp_context *context)
 {
 	kit_prof_scanline(context); // rotating-line PC sample for the HUD idle detector (cheap early-out)
+	record_line_mode(context); //the row that just finished, in the mode that finished it
 	//This function is kind of gross because of the need to deal with vertical border busting via mode changes
 	uint16_t lines_max = context->inactive_start + context->border_bot + context->border_top;
 	uint32_t output_line = context->vcounter;
@@ -3098,7 +3186,7 @@ static void advance_output_line(vdp_context *context)
 	if (context->output_lines >= lines_max || (!context->pushed_frame && output_line == context->inactive_start + context->border_top)) {
 		//we've either filled up a full frame or we're at the bottom of screen in the current defined mode + border crop
 		if (!headless) {
-			render_framebuffer_updated(context->cur_buffer, context->h40_lines > (context->inactive_start + context->border_top) / 2 ? LINEBUF_SIZE : (256+HORIZ_BORDER));
+			push_framebuffer(context, context->inactive_start + context->border_top);
 			uint8_t is_even = context->flags2 & FLAG2_EVEN_FIELD;
 			if (context->vcounter <= context->inactive_start && (context->regs[REG_MODE_4] & BIT_INTERLACE)) {
 				is_even = !is_even;
@@ -3113,6 +3201,7 @@ static void advance_output_line(vdp_context *context)
 		kit_prof_frame(context);
 		kit_script_frame(context->frame);
 		vdp_update_per_frame_debug(context);
+		reset_line_modes(context);
 		context->h40_lines = 0;
 		context->frame++;
 		context->output_lines = 0;
@@ -3160,7 +3249,7 @@ static void advance_output_line(vdp_context *context)
 void vdp_release_framebuffer(vdp_context *context)
 {
 	if (context->fb) {
-		render_framebuffer_updated(context->cur_buffer, context->h40_lines > (context->inactive_start + context->border_top) / 2 ? LINEBUF_SIZE : (256+HORIZ_BORDER));
+		push_framebuffer(context, context->inactive_start + context->border_top);
 		context->output = context->fb = NULL;
 	}
 }

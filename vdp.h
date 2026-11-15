@@ -278,6 +278,9 @@ struct vdp_context {
 	uint8_t        selected_test_reg;
 	uint8_t        is_threaded_renderer;
 	int32_t        color_map[1 << 12];
+	//per framebuffer row: the mode that finished drawing it (LINE_MODE_*), for frames that mix H32 and H40 lines
+	uint16_t       mixed_lines[2];
+	uint8_t        line_mode[512];
 	uint8_t        vdpmem[];
 };
 
