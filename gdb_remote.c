@@ -172,16 +172,14 @@ void m68k_write_byte(m68k_context * context, uint32_t address, uint8_t value)
 	}
 }
 
-// Read a longword from 68k address space. The new core exposes this via
-// backend.h's read_word(); the old core uses the VDP DMA helper.
+// Read a longword from 68k address space with read_word() (backend.h), in both cores. Upstream af6f740 stopped
+// using the VDP DMA helper here (read_dma_value now maps DMA sources, not CPU reads) but its m68k_read_long
+// shifts the low word too ("high | low << 16"), so a step at an rts/rte planted its breakpoint at a wrong
+// address; this one keeps the low word where it belongs.
 static uint32_t gdb_m68k_read_long(uint32_t address, m68k_context *context)
 {
-#ifdef NEW_CORE
 	return read_word(address, (void **)context->mem_pointers, &context->opts->gen, context) << 16
 	     | read_word(address + 2, (void **)context->mem_pointers, &context->opts->gen, context);
-#else
-	return (read_dma_value(address / 2) << 16) | read_dma_value(address / 2 + 1);
-#endif
 }
 
 // Single-step support. BlastEm has no hardware single-step, so to advance one
