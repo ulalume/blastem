@@ -6,6 +6,11 @@ name: build
 # asset names match what sgdkx downloads (BlastEm-macOS-<arch>-*,
 # blastem-linux-<arch>-*, blastem-win64-*). Self-contained: SDL2/GLEW are bundled
 # into each artifact.
+#
+# Build check without a release: run it manually with publish=false
+# (`gh workflow run build.yml --ref <branch> -f publish=false`). Every platform is
+# built and packaged the same way, the packages are kept as workflow artifacts,
+# and no release or tag is created or changed.
 
 on:
   push:
@@ -13,6 +18,11 @@ on:
     # never re-trigger this workflow.
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create the release and publish it as Latest (false: build check, packages as workflow artifacts)'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -52,13 +62,20 @@ jobs:
         run: |
           set -euo pipefail
           sha=$(git rev-parse --short=12 HEAD)
+          base=$(sed -E -n 's/.*BLASTEM_VERSION "([^"]+)".*/\1/p' version.inc)
+          # Build check (manual run with publish=false): no release, empty tag.
+          if [ "${{ github.event_name }}" = workflow_dispatch ] && [ "${{ inputs.publish }}" = false ]; then
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "ver=${base}-${sha}" >> "$GITHUB_OUTPUT"
+            echo "build check only: no release"
+            exit 0
+          fi
           # Tag push: release under the pushed tag. Manual run: keep build-<sha>.
           if [ "${GITHUB_REF_TYPE:-}" = tag ]; then
             tag="$GITHUB_REF_NAME"
           else
             tag="build-$sha"
           fi
-          base=$(sed -E -n 's/.*BLASTEM_VERSION "([^"]+)".*/\1/p' version.inc)
           ver="${base}-${sha}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
@@ -158,9 +175,16 @@ jobs:
           build_app arm64 ""
           build_app x86_64 "CPU=x86_64"
       - name: Upload to release
+        if: needs.release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release.outputs.tag }}" BlastEm-macOS-*.zip --clobber --repo "${{ github.repository }}"
+      - name: Keep as workflow artifact (build check)
+        if: needs.release.outputs.tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: BlastEm-macOS-*.zip
 
   # Linux x86_64 (JIT) and arm64 (interpreter), native runners. Portable: bundle
   # libSDL2/libGLEW next to the binary with an $ORIGIN/lib rpath.
@@ -199,9 +223,16 @@ jobs:
           tar czf "${dir}.tar.gz" "$dir"
           ls -la "${dir}.tar.gz"
       - name: Upload to release
+        if: needs.release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release.outputs.tag }}" blastem-linux-*.tar.gz --clobber --repo "${{ github.repository }}"
+      - name: Keep as workflow artifact (build check)
+        if: needs.release.outputs.tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: blastem-linux-*.tar.gz
 
   # Windows x86_64, cross-compiled with mingw-w64 (as upstream). Self-contained
   # bundle with SDL2.dll alongside.
@@ -244,13 +275,21 @@ jobs:
           zip -r "${dir}.zip" "$dir"
           ls -la "${dir}.zip"
       - name: Upload to release
+        if: needs.release.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release.outputs.tag }}" blastem-win64-*.zip --clobber --repo "${{ github.repository }}"
+      - name: Keep as workflow artifact (build check)
+        if: needs.release.outputs.tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: blastem-win64-*.zip
 
   # Publish the release and mark it Latest only after every platform succeeded.
   publish:
     needs: [release, macos, linux, windows]
+    if: needs.release.outputs.tag != ''
     runs-on: ubuntu-latest
     steps:
       - name: Publish and mark Latest
