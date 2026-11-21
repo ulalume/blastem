@@ -326,6 +326,8 @@ void vdp_serialize(vdp_context *context, serialize_buffer *buf);
 void vdp_deserialize(deserialize_buffer *buf, void *vcontext);
 void vdp_update_per_frame_debug(vdp_context *context);
 void vdp_force_update_framebuffer(vdp_context *context);
+//frames that mix H32 and H40 lines: 0 = majority width (default), 1 = H32 lines stretched, 2 = stretched and blended
+void vdp_set_mixed_width(uint8_t mode);
 void vdp_toggle_debug_view(vdp_context *context, uint8_t debug_type);
 void vdp_inc_debug_mode(vdp_context *context);
 //to be implemented by the host system

@@ -415,6 +415,11 @@ int main(int argc, char ** argv)
 #endif
 	
 	config = load_config();
+	// frames that mix H32 and H40 lines (vdp.c): video.mixed_width off / nearest / blend; BLASTEM_MIXED_WIDTH wins
+	if (!getenv("BLASTEM_MIXED_WIDTH")) {
+		char *mixed = tern_find_path(config, "video\0mixed_width\0", TVAL_PTR).ptrval;
+		vdp_set_mixed_width(!mixed ? 0 : !strcmp(mixed, "nearest") ? 1 : !strcmp(mixed, "blend") ? 2 : 0);
+	}
 	int width = -1;
 	int height = -1;
 	int debug = 0;

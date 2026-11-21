@@ -3041,25 +3041,34 @@ enum {
 	LINE_MODE_WIDE //an H32 row already stretched to the H40 layout by an earlier push of this frame
 };
 
-//BLASTEM_MIXED_WIDTH: 0 = push a frame with mixed H32 and H40 lines at its majority width (H40 lines get cropped or
-//H32 lines get padded), 1 (default) = stretch its H32 lines to the H40 width with nearest-neighbour pixels (4 -> 5),
-//2 = the same with blended pixels
+//Frames that mix H32 and H40 lines (a mode switch in the middle of a frame):
+//0 (default, as upstream) = push the frame at its majority width: H40 lines get cropped or H32 lines padded;
+//1 = stretch its H32 lines to the H40 width with nearest-neighbour pixels (4 -> 5); 2 = the same, blended.
+//video.mixed_width in the config (off / nearest / blend, read by blastem.c) sets it through vdp_set_mixed_width;
+//the BLASTEM_MIXED_WIDTH environment variable (0 / 1 / 2) wins over the config.
+static int8_t mixed_width = -1;
+
+void vdp_set_mixed_width(uint8_t mode)
+{
+	mixed_width = mode <= 2 ? mode : 0;
+}
+
 static uint8_t mixed_width_mode(void)
 {
-	static int8_t mode = -1;
-	if (mode < 0) {
+	if (mixed_width < 0) {
 		char *env = getenv("BLASTEM_MIXED_WIDTH");
-		mode = env && *env ? atoi(env) : 1;
-		if (mode < 0 || mode > 2) {
-			mode = 1;
+		mixed_width = env && *env ? atoi(env) : 0;
+		if (mixed_width < 0 || mixed_width > 2) {
+			mixed_width = 0;
 		}
 	}
-	return mode;
+	return mixed_width;
 }
 
 static void record_line_mode(vdp_context *context)
 {
-	if (!context->output || !context->fb || context->s32x_vid) {
+	//off: one test per line, and no frame ever counts as mixed
+	if (!mixed_width_mode() || !context->output || !context->fb || context->s32x_vid) {
 		return;
 	}
 	uint32_t row = ((char *)context->output - (char *)context->fb) / context->output_pitch;
