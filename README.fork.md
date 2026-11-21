@@ -44,9 +44,11 @@ Try it with the test ROM in `kit-tests/mixed_width/` (H40 above line 112, H32 be
 
 ```
 cd kit-tests/mixed_width && sgdkx make release
-BLASTEM_MIXED_WIDTH=0 ../../blastem out/release/rom.bin    # off: the H40 half is cropped to the H32 width
-BLASTEM_MIXED_WIDTH=1 ../../blastem out/release/rom.bin    # on: the whole frame at 320 wide, lower half stretched
+BLASTEM_MIXED_WIDTH=0 ../../blastem out/release/rom.bin    # off
+BLASTEM_MIXED_WIDTH=1 ../../blastem out/release/rom.bin    # nearest
+BLASTEM_MIXED_WIDTH=2 ../../blastem out/release/rom.bin    # blend
 ```
 
-The digits `0123456789` repeat across every row, so the stretched lower half shows 32 columns spread over the H40
-width, under the 40 columns of the upper half.
+The digits `0123456789` repeat across every row. Off, most of this frame's lines are H40, so the frame is 320 wide
+and the H32 lower half fills only its left 256 pixels; the rest of those rows is stale pixels and black. On, the
+lower half's 32 columns are stretched over the full width, under the 40 columns of the upper half.
