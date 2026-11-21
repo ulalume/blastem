@@ -17,6 +17,23 @@
 //                             round-trip happens to land on.
 //   vramdump <path>           dump a binary VRAM/CRAM/VSRAM/regs snapshot at the next frame
 //                             boundary (KITVDMP1 format; see kit_prof.c for the file layout)
+//   speed max|<percent>       emulation speed: "max" never waits for the audio device (as fast as
+//                             the host allows; audio is dropped), a percentage is the existing
+//                             speed setting (100 = real time). Emulated results are the same at
+//                             any speed; only wall-clock timing changes. Needs sync_source audio.
+//   scriptend hold [N]|run    what happens when a frame script has run its last action: "hold"
+//                             pauses emulation once the frame of the last action (or the last
+//                             frame of a burst) and N more frames (default 0) have been emulated,
+//                             so the log ends at a fixed frame; "run" (default) keeps going.
+//                             Sticky until changed.
+//   pause / resume            pause or resume emulation; the socket stays live while paused
+//   prof ...                  profiler: see kit_prof.h (bracket, func, lap, clear, log)
+//
+// BLASTEM_CTRL_INIT=<file>: the lines of <file> are run as commands, as if sent over the socket,
+// after the machine is created and before its first instruction, so a frame script, VRAM hash,
+// profiler or speed setting is in place from reset (frame 0) instead of whenever the socket
+// happens to be read. Blank lines and lines starting with '#' are skipped. Prints
+// "KIT INIT file=<path> commands=<n>" or "KIT INIT error file=<path> cannot open".
 //
 // Buttons: up down left right a b c x y z start mode
 //
@@ -125,6 +142,45 @@ static void process_command(char *line)
 		}
 		kit_script_set_capture(render_save_screenshot, render_save_screenshot_burst);
 		kit_script_load(path);
+	} else if (!strcmp(cmd, "scriptend")) {
+		char *mode = strtok(NULL, " \t");
+		char *tail = strtok(NULL, " \t");
+		if (mode && !strcmp(mode, "hold")) {
+			kit_script_set_hold(1, tail ? (uint32_t)strtoul(tail, NULL, 10) : 0);
+		} else if (mode && !strcmp(mode, "run")) {
+			kit_script_set_hold(0, 0);
+		} else {
+			warning("ctrl_sock: expected 'scriptend <hold [frames]|run>'\n");
+		}
+	} else if (!strcmp(cmd, "pause")) {
+		if (current_system && !current_system->paused) {
+			current_system->paused = 1;
+			system_request_exit(current_system, 1);
+		}
+	} else if (!strcmp(cmd, "resume")) {
+		kit_script_resume();
+	} else if (!strcmp(cmd, "speed")) {
+		char *arg = strtok(NULL, " \t");
+		char line[64];
+		if (arg && !strcmp(arg, "max")) {
+			if (!render_is_audio_sync() || render_is_threaded_video()) {
+				warning("ctrl_sock: 'speed max' needs system.sync_source audio; speed unchanged\n");
+				return;
+			}
+			render_set_unthrottled(1);
+			kit_emit_line("KIT SPEED max");
+		} else if (arg && strtol(arg, NULL, 10) > 0) {
+			uint32_t percent = (uint32_t)strtol(arg, NULL, 10);
+			render_set_unthrottled(0);
+			if (current_system && current_system->set_speed_percent) {
+				current_system->set_speed_percent(current_system, percent);
+			}
+			render_set_speed_percent(percent);
+			snprintf(line, sizeof(line), "KIT SPEED %u", percent);
+			kit_emit_line(line);
+		} else {
+			warning("ctrl_sock: expected 'speed <max|percent>'\n");
+		}
 	} else if (!strcmp(cmd, "frame")) {
 		kit_script_report_frame();
 	} else if (!strcmp(cmd, "logframes")) {
@@ -156,12 +212,33 @@ static void process_command(char *line)
 			char *start = strtok(NULL, " \t");
 			char *end = strtok(NULL, " \t");
 			if (!name || !start || !end) {
-				warning("ctrl_sock: expected 'prof bracket <name> <start_hex> <end_hex>'\n");
+				warning("ctrl_sock: expected 'prof bracket <name> <start_hex> <end_hex>[,<end_hex>...]'\n");
 				return;
 			}
 			uint32_t start_addr = (uint32_t)strtoul(start, NULL, 16);
-			uint32_t end_addr = (uint32_t)strtoul(end, NULL, 16);
-			kit_prof_add_bracket(name, start_addr, end_addr);
+			// several exits (two rts, a tail jmp): comma-separated end addresses
+			uint32_t end_addrs[KIT_PROF_MAX_ENDS];
+			uint8_t num_ends = 0;
+			for (char *p = end; *p; )
+			{
+				char *next;
+				uint32_t addr = (uint32_t)strtoul(p, &next, 16);
+				if (next == p || num_ends == KIT_PROF_MAX_ENDS || (*next && *next != ',')) {
+					warning("ctrl_sock: bad end address list '%s' (at most %d, comma-separated)\n", end, KIT_PROF_MAX_ENDS);
+					return;
+				}
+				end_addrs[num_ends++] = addr;
+				p = *next ? next + 1 : next;
+			}
+			kit_prof_add_bracket(name, start_addr, end_addrs, num_ends);
+		} else if (!strcmp(sub, "func")) {
+			char *name = strtok(NULL, " \t");
+			char *entry = strtok(NULL, " \t");
+			if (!name || !entry) {
+				warning("ctrl_sock: expected 'prof func <name> <entry_hex>'\n");
+				return;
+			}
+			kit_prof_add_func(name, (uint32_t)strtoul(entry, NULL, 16));
 		} else if (!strcmp(sub, "clear")) {
 			kit_prof_clear();
 		} else if (!strcmp(sub, "log")) {
@@ -297,10 +374,48 @@ static void ctrl_sock_init(void)
 	debug_message("ctrl_sock: listening on %s\n", path);
 }
 
+void ctrl_fifo_run_init(void)
+{
+	static uint8_t done;
+	const char *path = getenv("BLASTEM_CTRL_INIT");
+	if (done || !path || !*path) {
+		return;
+	}
+	done = 1;
+	char line[4200];
+	FILE *f = fopen(path, "r");
+	if (!f) {
+		snprintf(line, sizeof(line), "KIT INIT error file=%s cannot open", path);
+		kit_emit_line(line);
+		return;
+	}
+	uint32_t count = 0;
+	while (fgets(line, sizeof(line), f))
+	{
+		char *end = line + strlen(line);
+		while (end > line && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ' || end[-1] == '\t')) {
+			*--end = 0;
+		}
+		char *start = line;
+		while (*start == ' ' || *start == '\t') {
+			start++;
+		}
+		if (!*start || *start == '#') {
+			continue;
+		}
+		process_command(start);
+		count++;
+	}
+	fclose(f);
+	snprintf(line, sizeof(line), "KIT INIT file=%s commands=%u", path, count);
+	kit_emit_line(line);
+}
+
 void ctrl_fifo_poll(void)
 {
 	static uint8_t initialized;
-	static char buf[256];
+	// long enough for "script <absolute path>" lines (the old 256 silently dropped long ones)
+	static char buf[4096];
 	static size_t buffered;
 	if (!initialized) {
 		initialized = 1;

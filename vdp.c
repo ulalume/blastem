@@ -2930,8 +2930,6 @@ static void sprite_debug_tms(pixel_t *fb, uint32_t pitch, vdp_context *context)
 
 void vdp_update_per_frame_debug(vdp_context *context)
 {
-	kit_prof_frame(context);
-	kit_script_frame(context->frame);
 	if (context->enabled_debuggers & (1 << DEBUG_PLANE)) {
 		
 		uint32_t pitch;
@@ -3109,6 +3107,11 @@ static void advance_output_line(vdp_context *context)
 			context->pushed_frame = 1;
 			context->fb = NULL;
 		}
+		// kit hooks only here, at the real end of a frame: vdp_update_per_frame_debug() is also
+		// called by the paused loop and the debugger to refresh debug views, after frame++ below,
+		// which would log a frame that was never emulated
+		kit_prof_frame(context);
+		kit_script_frame(context->frame);
 		vdp_update_per_frame_debug(context);
 		context->h40_lines = 0;
 		context->frame++;

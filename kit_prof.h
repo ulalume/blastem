@@ -24,9 +24,18 @@ struct vdp_context;
 // the pointer is remembered the first time a non-null value is supplied.
 void kit_prof_set_context(struct m68k_context *m68k);
 
-// Register a named PC bracket. start_addr/end_addr are 68K addresses. Returns 0 on success,
-// nonzero on error (no m68k context yet, duplicate name, or table full).
-uint8_t kit_prof_add_bracket(const char *name, uint32_t start_addr, uint32_t end_addr);
+#define KIT_PROF_MAX_ENDS 8
+
+// Register a named PC bracket: from passing start_addr to passing any of end_addrs (a function
+// with two rts, or one that leaves by a tail jmp, has several exits). 68K addresses. Returns 0 on
+// success, nonzero on error (no m68k context yet, duplicate name, table full, 0 or too many ends).
+uint8_t kit_prof_add_bracket(const char *name, uint32_t start_addr, const uint32_t *end_addrs, uint8_t num_ends);
+
+// Register a named function bracket: from passing entry_addr until that call returns, i.e. until
+// the PC reaches the return address that was on the stack at entry with a7 back above it. Covers
+// every rts and tail-call jmp exit without listing them. A nested entry (recursion, an interrupt
+// calling it) counts inside the outer call. Same table, line format and errors as a bracket.
+uint8_t kit_prof_add_func(const char *name, uint32_t entry_addr);
 
 // Register a named PC lap: the 68K cycles between consecutive executions of addr. Reported in the
 // same "KIT PROF" line and the same "<name>=<cycles>:<hits>" shape as a bracket, so hits==0 means

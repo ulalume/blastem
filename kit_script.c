@@ -10,14 +10,17 @@
 #include "system.h"
 #include "io.h"
 
-#define KIT_SCRIPT_TEXT_LEN 160
+// paths are absolute (run_scenario.sh resolves them), so leave room for deep directories
+#define KIT_SCRIPT_TEXT_LEN 1024
+#define KIT_SCRIPT_LINE_LEN (KIT_SCRIPT_TEXT_LEN + 256)
 
 enum {
 	KS_DOWN,
 	KS_UP,
 	KS_SHOT,
 	KS_BURST,
-	KS_LOG
+	KS_LOG,
+	KS_VDUMP
 };
 
 typedef struct {
@@ -41,6 +44,15 @@ static char     anchor_text[KIT_SCRIPT_TEXT_LEN];
 static uint32_t script_frame_now;
 static uint32_t script_last_boundary = 0xFFFFFFFFu;
 static char    *script_path;
+
+// "scriptend hold": pause once the frame of the last action (the last frame of a burst) has been
+// emulated, so the log, the VRAM hashes and the profiler rows end at a fixed frame
+static uint8_t  hold_at_end;
+static uint32_t hold_tail;      // frames to keep emulating after the last one before pausing
+static uint8_t  held;           // this script has already paused once
+static uint32_t hold_frame;     // last frame the script captures or acts on (absolute)
+
+static void kit_script_apply_due(void);
 
 static void (*capture_shot)(char *path);
 static void (*capture_burst)(char *prefix, uint32_t count);
@@ -94,7 +106,25 @@ static void script_free(void)
 	anchor_base = 0;
 	anchor_wait = 0;
 	script_ended = 0;
+	held = 0;
+	hold_frame = 0;
 	anchor_text[0] = 0;
+}
+
+void kit_script_set_hold(uint8_t on, uint32_t tail_frames)
+{
+	hold_at_end = on ? 1 : 0;
+	hold_tail = on ? tail_frames : 0;
+}
+
+void kit_script_resume(void)
+{
+	if (current_system && current_system->paused) {
+		current_system->paused = 0;
+		char line[64];
+		snprintf(line, sizeof(line), "KIT RESUME frame=%u", script_frame_now);
+		kit_emit_line(line);
+	}
 }
 
 static char *trim(char *s)
@@ -112,7 +142,7 @@ static char *trim(char *s)
 
 static void script_error(const char *path, uint32_t lineno, const char *msg)
 {
-	char line[512];
+	char line[KIT_SCRIPT_LINE_LEN];
 	snprintf(line, sizeof(line), "KIT SCRIPT error file=%s line=%u %s", path, lineno, msg);
 	kit_emit_line(line);
 	script_free();
@@ -156,14 +186,14 @@ uint8_t kit_script_load(const char *path)
 	}
 	FILE *f = fopen(path, "r");
 	if (!f) {
-		char line[512];
+		char line[KIT_SCRIPT_LINE_LEN];
 		snprintf(line, sizeof(line), "KIT SCRIPT error file=%s cannot open", path);
 		kit_emit_line(line);
 		return 1;
 	}
 	script_path = strdup(path);
 
-	char raw[512];
+	char raw[KIT_SCRIPT_LINE_LEN];
 	uint32_t lineno = 0, cap = 0, prev_frame = 0, section_start = 0;
 	uint8_t have_anchor = 0;
 	while (fgets(raw, sizeof(raw), f))
@@ -228,17 +258,17 @@ uint8_t kit_script_load(const char *path)
 			a->port = (uint8_t)atoi(port);
 			a->buttons = mask;
 			snprintf(a->text, sizeof(a->text), "%s", buttons);
-		} else if (!strcmp(verb, "shot") || !strcmp(verb, "log")) {
+		} else if (!strcmp(verb, "shot") || !strcmp(verb, "log") || !strcmp(verb, "vramdump")) {
 			char *rest = strtok(NULL, "");
 			rest = rest ? trim(rest) : NULL;
 			if (!rest || !*rest || strlen(rest) >= KIT_SCRIPT_TEXT_LEN) {
 				fclose(f);
-				script_error(path, lineno, "expected '<frame> shot|log <text>'");
+				script_error(path, lineno, "expected '<frame> shot|log|vramdump <text>'");
 				return 1;
 			}
 			kit_action *a = push_action(&cap);
 			a->frame = (uint32_t)frame;
-			a->kind = verb[0] == 's' ? KS_SHOT : KS_LOG;
+			a->kind = verb[0] == 's' ? KS_SHOT : verb[0] == 'l' ? KS_LOG : KS_VDUMP;
 			snprintf(a->text, sizeof(a->text), "%s", rest);
 		} else if (!strcmp(verb, "burst")) {
 			char *count = strtok(NULL, " \t");
@@ -271,11 +301,14 @@ uint8_t kit_script_load(const char *path)
 		anchor_split = num_actions;
 	}
 
-	char line[512];
+	char line[KIT_SCRIPT_LINE_LEN];
 	snprintf(line, sizeof(line), "KIT SCRIPT loaded file=%s actions=%u absolute=%u anchor=%s now=%u",
 		path, num_actions, anchor_split, have_anchor ? anchor_text : "-", script_frame_now);
 	kit_emit_line(line);
-	if (anchor_split && actions[0].frame <= script_frame_now) {
+	if (script_last_boundary == 0xFFFFFFFFu) {
+		// loaded before the first instruction (BLASTEM_CTRL_INIT): frame-0 actions are on time
+		kit_script_apply_due();
+	} else if (anchor_split && actions[0].frame <= script_frame_now) {
 		snprintf(line, sizeof(line), "KIT SCRIPT warn first=%u already passed (now=%u) -- not reproducible",
 			actions[0].frame, script_frame_now);
 		kit_emit_line(line);
@@ -290,7 +323,7 @@ void kit_script_kdebug(const char *msg, uint32_t frame)
 	}
 	anchor_wait = 0;
 	anchor_base = frame;
-	char line[512];
+	char line[KIT_SCRIPT_LINE_LEN];
 	snprintf(line, sizeof(line), "KIT SCRIPT anchor frame=%u text=%s dropped=%u",
 		frame, anchor_text, anchor_split - next_action);
 	kit_emit_line(line);
@@ -321,7 +354,11 @@ static void apply_pad(kit_action *a)
 
 static void apply_action(kit_action *a, uint32_t target)
 {
-	char line[512];
+	char line[KIT_SCRIPT_LINE_LEN];
+	uint32_t last = target + (a->kind == KS_BURST ? a->count - 1 : 0);
+	if (last > hold_frame) {
+		hold_frame = last;
+	}
 	switch (a->kind)
 	{
 	case KS_DOWN:
@@ -344,6 +381,12 @@ static void apply_action(kit_action *a, uint32_t target)
 		snprintf(line, sizeof(line), "KIT SCRIPT frame=%u at=%u burst %u %s",
 			script_frame_now, target, a->count, a->text);
 		break;
+	case KS_VDUMP:
+		// taken at the end of this frame: the same state as its KIT VHASH line and its shot
+		kit_prof_request_vramdump(a->text);
+		snprintf(line, sizeof(line), "KIT SCRIPT frame=%u at=%u vramdump %s",
+			script_frame_now, target, a->text);
+		break;
 	default:
 		snprintf(line, sizeof(line), "KIT SCRIPT frame=%u at=%u log %s",
 			script_frame_now, target, a->text);
@@ -352,13 +395,9 @@ static void apply_action(kit_action *a, uint32_t target)
 	kit_emit_line(line);
 }
 
-void kit_script_frame(uint32_t finished_frame)
+// Apply every action due by script_frame_now; print "end" after the last one.
+static void kit_script_apply_due(void)
 {
-	if (finished_frame == script_last_boundary) {
-		return;
-	}
-	script_last_boundary = finished_frame;
-	script_frame_now = finished_frame + 1;
 	if (script_ended || !num_actions) {
 		return;
 	}
@@ -381,9 +420,33 @@ void kit_script_frame(uint32_t finished_frame)
 	}
 	if (next_action >= num_actions) {
 		script_ended = 1;
-		char line[512];
+		char line[KIT_SCRIPT_LINE_LEN];
 		snprintf(line, sizeof(line), "KIT SCRIPT end frame=%u actions=%u file=%s",
 			script_frame_now, num_actions, script_path ? script_path : "");
 		kit_emit_line(line);
+	}
+}
+
+void kit_script_frame(uint32_t finished_frame)
+{
+	if (finished_frame == script_last_boundary) {
+		return;
+	}
+	script_last_boundary = finished_frame;
+	script_frame_now = finished_frame + 1;
+	kit_script_apply_due();
+	// Hold: the frame that just finished is the script's last one, its shot is written (the frame
+	// was pushed before this hook ran) and its KIT VHASH / KIT PROF lines are out (kit_prof_frame
+	// runs first). Pause through the same path as the UI's pause: the control socket stays live in
+	// the paused loop, and "resume" continues.
+	if (hold_at_end && script_ended && !held && finished_frame >= hold_frame + hold_tail && current_system) {
+		held = 1;
+		char line[64];
+		snprintf(line, sizeof(line), "KIT SCRIPT hold frame=%u", finished_frame);
+		kit_emit_line(line);
+		if (!current_system->paused) {
+			current_system->paused = 1;
+			system_request_exit(current_system, 0);
+		}
 	}
 }

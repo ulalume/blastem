@@ -98,6 +98,7 @@ enum {
 };
 
 static uint8_t sync_src;
+static uint8_t unthrottled;
 static uint32_t min_buffered;
 
 pixel_t **frame_buffers;
@@ -299,6 +300,15 @@ void render_do_audio_ready(audio_source *src)
 		uint8_t all_ready = 0;
 		SDL_LockMutex(audio_mutex);
 #ifndef __EMSCRIPTEN__
+			if (unthrottled && src->front_populated) {
+				// "speed max": the device has not taken the previous buffer yet. Drop this one
+				// instead of waiting, so emulation runs as fast as the host allows while the
+				// device still gets a buffer whenever it asks (never starved, unlike skipping
+				// buffers altogether, which would block its callback).
+				src->buffer_pos = 0;
+				SDL_UnlockMutex(audio_mutex);
+				return;
+			}
 			if (src->front_populated) {
 				if (audio_deadlock_hack()) {
 					SDL_CondSignal(audio_ready);
@@ -1728,6 +1738,11 @@ static uint32_t set_frame_repeat_skip(int effective_source_hz)
 	return max_repeat;
 }
 
+void render_set_unthrottled(uint8_t on)
+{
+	unthrottled = on ? 1 : 0;
+}
+
 void render_set_speed_percent(uint32_t percent)
 {
 	if (vsync_enabled) {
@@ -2291,6 +2306,19 @@ static void process_framebuffer(pixel_t *buffer, uint8_t which, int width)
 		: 240;
 	FILE *screenshot_file = NULL;
 	char *ext;
+	// "speed max": upload and present at most ~30 times a second of host time. The window is
+	// usually hidden, and drawing every emulated frame was most of the cost of a frame there.
+	// Screenshots and bursts still get every frame (they are saved from the frame buffer).
+	uint8_t present = 1;
+	if (unthrottled && which <= FRAMEBUFFER_EVEN) {
+		static uint32_t last_present;
+		uint32_t now = SDL_GetTicks();
+		if (now - last_present < 33) {
+			present = 0;
+		} else {
+			last_present = now;
+		}
+	}
 	if (which < FRAMEBUFFER_UI) {
 		last_width = width;
 		width -= overscan_left[video_standard] + overscan_right[video_standard];
@@ -2321,9 +2349,11 @@ static void process_framebuffer(pixel_t *buffer, uint8_t which, int width)
 	}
 #ifndef DISABLE_OPENGL
 	if (render_gl && which <= FRAMEBUFFER_EVEN) {
-		SDL_GL_MakeCurrent(main_window, main_context);
-		glBindTexture(GL_TEXTURE_2D, textures[which]);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, LINEBUF_SIZE, height, SRC_FORMAT, SRC_TYPE, buffer);
+		if (present) {
+			SDL_GL_MakeCurrent(main_window, main_context);
+			glBindTexture(GL_TEXTURE_2D, textures[which]);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, LINEBUF_SIZE, height, SRC_FORMAT, SRC_TYPE, buffer);
+		}
 
 		if (screenshot_file) {
 			//properly supporting interlaced modes here is non-trivial, so only save the odd field for now
@@ -2398,7 +2428,15 @@ static void process_framebuffer(pixel_t *buffer, uint8_t which, int width)
 #endif
 	if (which <= FRAMEBUFFER_EVEN) {
 		last_height = height;
-		render_update_display();
+		if (present || !render_gl) {
+			render_update_display();
+		} else {
+			// what render_update_display does besides drawing: events and the control socket
+			if (!events_processed) {
+				process_events();
+			}
+			events_processed = 0;
+		}
 	} else if (which == FRAMEBUFFER_UI) {
 		SDL_RenderCopy(main_renderer, sdl_textures[which], NULL, NULL);
 		if (need_ui_fb_resize) {

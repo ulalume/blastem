@@ -22,13 +22,17 @@
 typedef struct {
 	char     name[KIT_PROF_NAME_LEN];
 	uint32_t start_addr;
-	uint32_t end_addr;
+	uint32_t end_addrs[KIT_PROF_MAX_ENDS];   // bracket: any of these closes it
 	uint32_t start_cycle;   // MCLK snapshot at last entry (absolute, rebase-adjusted)
 	uint32_t accum_mclk;    // MCLK accumulated this frame
 	uint32_t hits;          // completed brackets this frame
+	uint32_t entry_sp;      // func: a7 at entry (points at the return address)
+	uint32_t ret_addr;      // func: return address of the open call (breakpoint armed while active)
+	uint8_t  num_ends;
 	uint8_t  in_use;
 	uint8_t  active;        // bracket: currently inside [start,end). lap: a previous pass is held
 	uint8_t  is_lap;        // measure addr->addr intervals instead of [start,end)
+	uint8_t  is_func;       // from the entry until that call returns (any rts, tail jmp, ...)
 } kit_bracket;
 
 static kit_bracket brackets[KIT_PROF_MAX_BRACKETS];
@@ -143,6 +147,66 @@ static uint32_t kit_ctx_pc(struct m68k_context *c)
 #endif
 }
 
+static void kit_prof_handler(void *vcontext, uint32_t pc);
+
+// Is addr still needed by some bracket's breakpoint (start, an end, a func's armed return)?
+static uint8_t prof_addr_in_use(uint32_t addr, const kit_bracket *except)
+{
+	for (uint8_t i = 0; i < num_brackets; i++) {
+		const kit_bracket *b = &brackets[i];
+		if (!b->in_use) {
+			continue;
+		}
+		if (b->start_addr == addr) {
+			return 1;
+		}
+		for (uint8_t e = 0; e < b->num_ends; e++) {
+			if (b->end_addrs[e] == addr) {
+				return 1;
+			}
+		}
+		if (b != except && b->is_func && b->active && b->ret_addr == addr) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+static void func_disarm(kit_bracket *b)
+{
+	b->active = 0;
+	if (prof_m68k && !prof_addr_in_use(b->ret_addr, b)) {
+		remove_breakpoint(prof_m68k, b->ret_addr);
+	}
+}
+
+// A func bracket: entered at its start address with a7 pointing at the return address (jsr/bsr,
+// or a tail jmp from a caller whose own return address is there), closed when execution reaches
+// that return address with a7 back above it -- whichever rts or jmp the function leaves by.
+static void func_pass(kit_bracket *b, struct m68k_context *context, uint32_t pc)
+{
+	uint32_t sp = context->aregs[7];
+	if (pc == b->start_addr) {
+		if (b->active && sp < b->entry_sp) {
+			return; // nested call (recursion, or an interrupt calling it): part of the outer one
+		}
+		if (b->active) {
+			func_disarm(b); // the previous call never returned to its caller (stack reset): restart
+		}
+		uint32_t mask = context->opts->gen.address_mask;
+		b->entry_sp = sp;
+		b->ret_addr = ((uint32_t)m68k_instruction_fetch(sp & mask, context) << 16
+			| m68k_instruction_fetch((sp + 2) & mask, context)) & mask;
+		b->start_cycle = context->cycles;
+		b->active = 1;
+		insert_breakpoint(context, b->ret_addr, kit_prof_handler);
+	} else if (b->active && pc == b->ret_addr && sp == b->entry_sp + 4) {
+		b->accum_mclk += context->cycles - b->start_cycle;
+		b->hits++;
+		func_disarm(b);
+	}
+}
+
 // Single dispatching handler installed at both the start and end address of every bracket.
 // Enter at <start>: snapshot cycles, mark active (re-entry restarts the bracket).
 // Exit  at <end>:   if active, accumulate (cycles - start), bump hits, clear active.
@@ -159,6 +223,10 @@ static void kit_prof_handler(void *vcontext, uint32_t pc)
 		if (!b->in_use) {
 			continue;
 		}
+		if (b->is_func) {
+			func_pass(b, context, pc);
+			continue;
+		}
 		if (b->is_lap) {
 			if (pc == b->start_addr) {
 				if (b->active) {
@@ -173,11 +241,16 @@ static void kit_prof_handler(void *vcontext, uint32_t pc)
 		if (pc == b->start_addr) {
 			b->start_cycle = context->cycles;
 			b->active = 1;
-		} else if (pc == b->end_addr) {
-			if (b->active) {
-				b->accum_mclk += context->cycles - b->start_cycle;
-				b->hits++;
-				b->active = 0;
+			continue;
+		}
+		for (uint8_t e = 0; e < b->num_ends; e++) {
+			if (pc == b->end_addrs[e]) {
+				if (b->active) {
+					b->accum_mclk += context->cycles - b->start_cycle;
+					b->hits++;
+					b->active = 0;
+				}
+				break;
 			}
 		}
 	}
@@ -215,16 +288,35 @@ static kit_bracket *kit_prof_alloc(const char *name)
 	return b;
 }
 
-uint8_t kit_prof_add_bracket(const char *name, uint32_t start_addr, uint32_t end_addr)
+uint8_t kit_prof_add_bracket(const char *name, uint32_t start_addr, const uint32_t *end_addrs, uint8_t num_ends)
 {
+	if (!num_ends || num_ends > KIT_PROF_MAX_ENDS) {
+		warning("kit_prof: bracket '%s' needs 1 to %d end addresses\n", name, KIT_PROF_MAX_ENDS);
+		return 1;
+	}
 	kit_bracket *b = kit_prof_alloc(name);
 	if (!b) {
 		return 1;
 	}
 	b->start_addr = start_addr;
-	b->end_addr = end_addr;
 	insert_breakpoint(prof_m68k, start_addr, kit_prof_handler);
-	insert_breakpoint(prof_m68k, end_addr, kit_prof_handler);
+	for (uint8_t e = 0; e < num_ends; e++) {
+		b->end_addrs[e] = end_addrs[e];
+		insert_breakpoint(prof_m68k, end_addrs[e], kit_prof_handler);
+	}
+	b->num_ends = num_ends;
+	return 0;
+}
+
+uint8_t kit_prof_add_func(const char *name, uint32_t entry_addr)
+{
+	kit_bracket *b = kit_prof_alloc(name);
+	if (!b) {
+		return 1;
+	}
+	b->start_addr = entry_addr;
+	b->is_func = 1;
+	insert_breakpoint(prof_m68k, entry_addr, kit_prof_handler);
 	return 0;
 }
 
@@ -235,7 +327,6 @@ uint8_t kit_prof_add_lap(const char *name, uint32_t addr)
 		return 1;
 	}
 	b->start_addr = addr;
-	b->end_addr = addr;
 	b->is_lap = 1;
 	insert_breakpoint(prof_m68k, addr, kit_prof_handler);
 	return 0;
@@ -247,8 +338,11 @@ void kit_prof_clear(void)
 		for (uint8_t i = 0; i < num_brackets; i++) {
 			if (brackets[i].in_use) {
 				remove_breakpoint(prof_m68k, brackets[i].start_addr);
-				if (!brackets[i].is_lap) {
-					remove_breakpoint(prof_m68k, brackets[i].end_addr);
+				for (uint8_t e = 0; e < brackets[i].num_ends; e++) {
+					remove_breakpoint(prof_m68k, brackets[i].end_addrs[e]);
+				}
+				if (brackets[i].is_func && brackets[i].active) {
+					remove_breakpoint(prof_m68k, brackets[i].ret_addr);
 				}
 			}
 		}
@@ -752,12 +846,20 @@ void kit_watch_check(struct m68k_context *context, uint32_t addr, uint32_t val, 
 #define KIT_VDUMP_MAGIC "KITVDMP1"
 #define KIT_VDUMP_MAGIC_LEN 8
 
-static char *vramdump_pending_path;
+#define KIT_VDUMP_QUEUE 8
+static char   *vramdump_pending[KIT_VDUMP_QUEUE];  // taken in order at the next frame boundary
+static uint8_t vramdump_count;
 
 void kit_prof_request_vramdump(const char *path)
 {
-	free(vramdump_pending_path);
-	vramdump_pending_path = (path && *path) ? strdup(path) : NULL;
+	if (!path || !*path) {
+		return;
+	}
+	if (vramdump_count == KIT_VDUMP_QUEUE) {
+		warning("kit_prof: more than %d vramdumps pending in one frame, ignoring '%s'\n", KIT_VDUMP_QUEUE, path);
+		return;
+	}
+	vramdump_pending[vramdump_count++] = strdup(path);
 }
 
 static uint8_t kit_vdump_write_u32le(FILE *f, uint32_t v)
@@ -858,12 +960,12 @@ void kit_prof_frame(struct vdp_context *vdp)
 	// Zero cost when unused: a single non-null check. Take the dump here (same vdp context
 	// compute_vramhash()/emit_vramhash() just used above) so it lands at this frame boundary,
 	// coherent with whatever KIT VHASH was (or would be) logged for this same frame number.
-	if (vramdump_pending_path) {
-		char *path = vramdump_pending_path;
-		vramdump_pending_path = NULL;
-		kit_prof_do_vramdump(vdp, path);
-		free(path);
+	for (uint8_t i = 0; i < vramdump_count; i++) {
+		kit_prof_do_vramdump(vdp, vramdump_pending[i]);
+		free(vramdump_pending[i]);
+		vramdump_pending[i] = NULL;
 	}
+	vramdump_count = 0;
 
 	// Profiler bookkeeping runs whenever brackets exist (so the anchor stays fresh and the
 	// per-frame accumulators never grow across frames), or when logging a total-only line.

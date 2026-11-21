@@ -13,6 +13,8 @@
 //   <frame> shot <path>              save the frame rendered as <frame>
 //   <frame> burst <count> <prefix>   save <count> consecutive frames from <frame>
 //   <frame> log <text>               echo "KIT SCRIPT frame=<N> ... log <text>"
+//   <frame> vramdump <path>          KITVDMP1 snapshot of the end of <frame> (the state its KIT VHASH
+//                                    line hashes and its shot shows); one per frame
 //   anchor <text>                    re-origin the frames BELOW this line on the frame in which
 //                                    the ROM's KDEBUG output first contains <text>
 //
@@ -20,7 +22,13 @@
 // frames run in file order. Lines above an "anchor" are absolute and exist to reach the anchor;
 // any of them still pending when the anchor fires are dropped. An action whose frame has already
 // passed when the script loads fires at once and reports "KIT SCRIPT warn" -- that run is no
-// longer reproducible.
+// longer reproducible. A script loaded before the first instruction (BLASTEM_CTRL_INIT) is never
+// late: its frame-0 actions apply before frame 0 is emulated.
+//
+// "scriptend hold [T]" (kit_script_set_hold): once the last action has run and the last frame it
+// captures (a shot's frame, a burst's last frame) plus T more frames (default 0) have been
+// emulated, print "KIT SCRIPT hold frame=<N>" and pause; "resume" continues. The log then ends at
+// frame N on every run, however long the host takes to notice the end.
 
 #include <stdint.h>
 
@@ -42,6 +50,12 @@ void kit_script_report_frame(void);
 // Append " @f<N>" to KDEBUG MESSAGE lines (vdp.c) so ROM output carries the frame it came from.
 void kit_script_set_logframes(uint8_t on);
 extern uint8_t kit_logframes;
+
+// Sticky "scriptend hold [tail]|run" setting (default run). See above.
+void kit_script_set_hold(uint8_t on, uint32_t tail_frames);
+
+// Leave a pause (a "scriptend hold" or a "pause" command): prints "KIT RESUME frame=<N>".
+void kit_script_resume(void);
 
 // Supply the screenshot entry points. Called from ctrl_fifo.c: render_save_screenshot lives in
 // the SDL/fbdev renderers, which the core-only link (libblastem) does not have.

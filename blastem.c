@@ -31,6 +31,7 @@
 #include "zip.h"
 #include "cdimage.h"
 #include "event_log.h"
+#include "ctrl_fifo.h"
 #ifndef DISABLE_NUKLEAR
 #include "nuklear_ui/blastem_nuklear.h"
 #endif
@@ -720,6 +721,10 @@ int main(int argc, char ** argv)
 
 	current_system->debugger_type = dtype;
 	current_system->enter_debugger = start_in_debugger && menu == debug_target;
+	if (!menu) {
+		// BLASTEM_CTRL_INIT: frame script, VRAM hash, profiler, speed in place before the first instruction
+		ctrl_fifo_run_init();
+	}
 #ifndef __EMSCRIPTEN__
 	current_system->start_context(current_system,  menu ? NULL : statefile);
 	render_video_loop();
