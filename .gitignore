@@ -47,6 +47,8 @@ android/local.properties
 
 # Local notes / docs (kept locally, not tracked — see ../blastem for PATCHES.md etc.)
 *.md
+# ...except the fork README, which is tracked
+!README.fork.md
 
 # macOS
 .DS_Store
