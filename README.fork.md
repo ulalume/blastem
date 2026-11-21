@@ -27,6 +27,13 @@ Upstream changesets are replayed one by one with `./sync-upstream.sh`; the last 
 `kit_prof.h` and `kit_script.h`; genesis-kit's `tools/kit/docs/probes.md` and `scenario.md` describe how the kit
 uses them.
 
+## Kept instead of upstream's code
+
+- gdb single step (`gdb_remote.c`, 63d3297): the fork's own stepping, with `gdb_m68k_read_long`. Upstream added an
+  `m68k_read_long` in 8f6ab0bbeae1 that also shifts the low word (`high | low << 16`), so a step at an `rts` or `rte`
+  would plant its breakpoint at a wrong address. The bug is still there at upstream ce5e85c3b219, so the sync at that
+  changeset kept the fork's implementation unchanged.
+
 ## Mixed H32/H40 frames
 
 A game can switch between H32 (256 pixels) and H40 (320 pixels) in the middle of a frame, from an H interrupt.
