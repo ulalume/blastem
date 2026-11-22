@@ -55,6 +55,10 @@ jobs:
       ver: ${{ steps.mk.outputs.ver }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags: the release notes list the commits since the
+          # previous release's tag (.github/release-notes.sh).
+          fetch-depth: 0
       - id: mk
         env:
           GH_TOKEN: ${{ github.token }}
@@ -79,14 +83,14 @@ jobs:
           ver="${base}-${sha}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
-          notes="Patched (debug-capable) BlastEm — GDB remote ( -D / BLASTEM_GDB_PORT ), a scriptable Unix-domain control socket ( BLASTEM_CTRL_SOCK ), and an embedded UI font. Built from ${REPO}@${sha}.
-
-          Fork changes are dedicated to the public domain (The Unlicense — see COPYING.fork); BlastEm itself is GPLv3 (see COPYING)."
+          # Fork description + the commits since the previous published release.
+          bash .github/release-notes.sh "$REPO" HEAD > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
-            gh release edit "$tag" --repo "$REPO" --title "BlastEm debug-capable $sha" --notes "$notes"
+            gh release edit "$tag" --repo "$REPO" --title "BlastEm debug-capable $sha" --notes-file "$RUNNER_TEMP/notes.md"
           else
             gh release create "$tag" --repo "$REPO" --target "$GITHUB_SHA" \
-              --title "BlastEm debug-capable $sha" --notes "$notes" --draft
+              --title "BlastEm debug-capable $sha" --notes-file "$RUNNER_TEMP/notes.md" --draft
           fi
 
   # macOS: two .app bundles (arm64 + x86_64), both built on an Apple Silicon
