@@ -6,7 +6,8 @@
 # went stale when history was rewritten with git-filter-repo, so an incremental
 # fast-export would graft onto orphaned pre-rewrite commits. This script
 # replays changesets patch-by-patch instead: for each new upstream rev it
-# applies `hg diff prev cur` and commits with the original author/date/message.
+# applies `hg diff prev cur` and commits with the original author/date/message,
+# plus an "Upstream-Rev: <hg node>" trailer (earlier replays: .github/upstream-revs.txt).
 #
 # Self-contained — nothing outside this repository is needed:
 #   - the Mercurial mirror is a private cache inside the git dir
@@ -89,6 +90,8 @@ echo "$NEW" | while read -r node; do
   author=$(hg -R "$HG_CACHE" log -r "$node" -T '{author}')
   adate=$(hg -R "$HG_CACHE" log -r "$node" -T '{date|rfc822date}')
   hg -R "$HG_CACHE" log -r "$node" -T '{desc}' > "$tmp/msg"
+  # Release notes link each upstream commit to retrodev by this trailer.
+  git interpret-trailers --in-place --trailer "Upstream-Rev: $node" "$tmp/msg"
   GIT_COMMITTER_NAME="${author%% <*}" \
   GIT_COMMITTER_EMAIL="$(echo "$author" | sed -n 's/.*<\(.*\)>.*/\1/p')" \
   GIT_COMMITTER_DATE="$adate" \
