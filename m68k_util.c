@@ -1,5 +1,8 @@
 #include <string.h>
 #include "kit_prof.h" // watchlog write-path hook (kit_watch_count / kit_watch_check)
+// prof count: per-instruction execution counts (cpu_dsl.py's breakpoint loop calls the hook)
+#define M68K_PC_HOOK_ACTIVE kit_count_len
+#define M68K_PC_HOOK(context, pc) kit_count_pc(pc)
 #ifdef DEBUG_DISASM
 #include "68kinst.h"
 #endif

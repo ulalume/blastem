@@ -119,6 +119,52 @@ void kit_watch_check(struct m68k_context *context, uint32_t addr, uint32_t val, 
 // Zero cost when never called: kit_prof_frame's pending check is a single null-pointer test.
 void kit_prof_request_vramdump(const char *path);
 
+// ---------------------------------------------------------------------------
+// FEATURE D: prof count (per-instruction execution counts) -- NEW_CORE interpreter only.
+// ---------------------------------------------------------------------------
+//
+//   prof count <start_hex> <end_hex> [<path>]
+//       Count how many times each instruction address in [start, end) is executed, from now on,
+//       in one run. Re-arming resets the counts. With <path>, the counts are also written there
+//       when blastem exits (run_live.sh --kill, window close).
+//   prof countdump <path>
+//       Write the counts now. Paused at `scriptend hold`, that is a fixed frame.
+//   prof count off   /   prof clear
+//       Stop counting and free the table (`prof clear` resets the whole profiler).
+//
+// Dump format: one header line, then one line per address executed at least once, ascending:
+//   # KIT COUNT start=<hex> end=<hex> frame=<N>
+//   <addr_hex>\t<count>
+// An address not listed was not executed (or is not an instruction start). Prints
+// "KIT COUNT frame=<N> file=<path> addrs=<lines> total=<sum of counts>".
+//
+// Cost: while armed, the interpreter runs its breakpoint loop (as with any `prof bracket`) plus
+// one compare and one increment per instruction. Memory: one 64-bit counter per 16-bit word of the
+// range (a 4 MB ROM: 16 MB). Counting never writes emulator state, so the emulated run is the same
+// with it on or off. The x86 JIT core (x86_64 / i686 builds) has no per-instruction loop: there the
+// command is refused with a warning.
+
+// Read by the interpreter loop (m68k_util.c / cpu_dsl.py): the counted range, its length in bytes
+// (0 = off), and one 64-bit counter per 16-bit word.
+extern uint32_t kit_count_start;
+extern uint32_t kit_count_len;
+extern uint64_t *kit_count_tab;
+
+static inline void kit_count_pc(uint32_t pc)
+{
+	uint32_t off = pc - kit_count_start;
+	if (off < kit_count_len) {
+		kit_count_tab[off >> 1]++;
+	}
+}
+
+// Arm counting over [start, end) (resets the counts). path: write at exit too (NULL: don't).
+// Returns 0 on success, nonzero on error (empty or too large range, JIT build, out of memory).
+uint8_t kit_count_arm(uint32_t start, uint32_t end, const char *path);
+void kit_count_off(void);
+// Write the counts to path now. Returns 0 on success.
+uint8_t kit_count_dump(const char *path);
+
 // Print one "KIT ..." line on the same stream as the KDEBUG output in vdp.c.
 void kit_emit_line(const char *line);
 
