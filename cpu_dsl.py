@@ -2739,7 +2739,12 @@ class Program:
 				if self.sync_cycle:
 					bodyPieces.append('\n\t{sync}(context, target_cycle);'.format(sync=self.sync_cycle))
 				if self.pc_reg:
-					bodyPieces.append('\n\tif (context->breakpoints) {')
+					# fork: optional per-instruction PC hook. A core's included C file may define
+					# <PREFIX>PC_HOOK(context, pc) and <PREFIX>PC_HOOK_ACTIVE; while ACTIVE is nonzero the
+					# breakpoint loop runs and calls the hook before each instruction. Undefined: no code.
+					hook = self.prefix.upper() + 'PC_HOOK'
+					bodyPieces.append(f'\n#ifndef {hook}\n#define {hook}_ACTIVE 0\n#define {hook}(context, pc)\n#endif')
+					bodyPieces.append(f'\n\tif (context->breakpoints || {hook}_ACTIVE) {{')
 					bodyPieces.append('\n\t\twhile (context->cycles < target_cycle)')
 					bodyPieces.append('\n\t\t{')
 					if self.interrupt in self.subroutines:
@@ -2753,6 +2758,7 @@ class Program:
 						pc_reg = 'debug_pc'
 					else:
 						pc_reg = 'context->' + self.pc_reg
+					bodyPieces.append(f'\n\t\t\t{hook}(context, {pc_reg});')
 					bodyPieces.append('\n\t\t\tchar key_buf[6];')
 					bodyPieces.append(f'\n\t\t\tdebug_handler handler = tern_find_ptr(context->breakpoints, tern_int_key({pc_reg}, key_buf));')
 					bodyPieces.append('\n\t\t\tif (handler) {')

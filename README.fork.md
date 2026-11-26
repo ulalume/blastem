@@ -21,11 +21,16 @@ domain (COPYING.fork); BlastEm is GPLv3 (COPYING). Upstream changesets are repla
 ## Control socket commands (summary)
 
 `pad`, `screenshot`, `burst`, `script` (frame-keyed input and captures), `scriptend hold|run`, `frame`,
-`logframes`, `vramhash`, `vramdump`, `prof bracket|func|lap|clear|log`, `hud`, `watchlog`, `speed max|<percent>`,
-`pause`, `resume`. Output lines start with `KIT `. Full syntax: the header comments of `ctrl_fifo.c`,
+`logframes`, `vramhash`, `vramdump`, `prof bracket|func|lap|count|countdump|clear|log`, `hud`, `watchlog`,
+`speed max|<percent>`, `pause`, `resume`. Output lines start with `KIT `. Full syntax: the header comments of `ctrl_fifo.c`,
 `kit_prof.h` and `kit_script.h`.
 
 ## Notes
+
+- `prof count <start> <end> [<path>]` counts every execution of each instruction address in a range in one run
+  (`prof countdump <path>`, or at exit with `<path>`: `<addr>\t<count>` lines). Interpreter builds only (the arm64
+  releases); the x86_64 JIT builds refuse it. It hooks the breakpoint loop that `cpu_dsl.py` generates
+  (`M68K_PC_HOOK`, defined in `m68k_util.c`), so an upstream change to that loop needs the hook kept.
 
 - gdb single step keeps the fork's `gdb_m68k_read_long` (`gdb_remote.c`): upstream's `m68k_read_long`
   (8f6ab0bbeae1) also shifts the low word, which puts the breakpoint after `rts`/`rte` at a wrong address.

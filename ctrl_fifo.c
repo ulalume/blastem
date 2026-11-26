@@ -28,6 +28,11 @@
 //                             Sticky until changed.
 //   pause / resume            pause or resume emulation; the socket stays live while paused
 //   prof ...                  profiler: see kit_prof.h (bracket, func, lap, clear, log)
+//   prof count <start_hex> <end_hex> [<path>]
+//                             count every execution of each instruction address in [start,end)
+//                             (interpreter builds); with <path>, written there at exit too
+//   prof countdump <path>     write those counts now: "<addr_hex>\t<count>" lines (kit_prof.h)
+//   prof count off            stop counting
 //
 // BLASTEM_CTRL_INIT=<file>: the lines of <file> are run as commands, as if sent over the socket,
 // after the machine is created and before its first instruction, so a frame script, VRAM hash,
@@ -195,7 +200,7 @@ static void process_command(char *line)
 	} else if (!strcmp(cmd, "prof")) {
 		char *sub = strtok(NULL, " \t");
 		if (!sub) {
-			warning("ctrl_sock: expected 'prof <bracket|lap|clear|log> ...'\n");
+			warning("ctrl_sock: expected 'prof <bracket|func|lap|count|countdump|clear|log> ...'\n");
 			return;
 		}
 		kit_prof_bind_system();
@@ -239,6 +244,32 @@ static void process_command(char *line)
 				return;
 			}
 			kit_prof_add_func(name, (uint32_t)strtoul(entry, NULL, 16));
+		} else if (!strcmp(sub, "count")) {
+			char *start = strtok(NULL, " \t");
+			if (start && !strcmp(start, "off")) {
+				kit_count_off();
+				return;
+			}
+			char *end = strtok(NULL, " \t");
+			char *path = strtok(NULL, "");
+			while (path && (*path == ' ' || *path == '\t')) {
+				path++;
+			}
+			if (!start || !end) {
+				warning("ctrl_sock: expected 'prof count <start_hex> <end_hex> [<path>]' or 'prof count off'\n");
+				return;
+			}
+			kit_count_arm((uint32_t)strtoul(start, NULL, 16), (uint32_t)strtoul(end, NULL, 16), path);
+		} else if (!strcmp(sub, "countdump")) {
+			char *path = strtok(NULL, "");
+			while (path && (*path == ' ' || *path == '\t')) {
+				path++;
+			}
+			if (!path || !*path) {
+				warning("ctrl_sock: expected 'prof countdump <path>'\n");
+				return;
+			}
+			kit_count_dump(path);
 		} else if (!strcmp(sub, "clear")) {
 			kit_prof_clear();
 		} else if (!strcmp(sub, "log")) {

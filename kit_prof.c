@@ -353,6 +353,7 @@ void kit_prof_clear(void)
 	// "clear" is a full profiler reset: also drop the log-enable flag so `prof clear` on its own
 	// stops KIT PROF emission (VHASH is controlled separately by `vramhash off`).
 	prof_log_enabled = 0;
+	kit_count_off();
 }
 
 void kit_prof_set_log(uint8_t on)
@@ -1023,4 +1024,123 @@ void kit_prof_rebase(uint32_t deduction)
 	if (have_window_start) {
 		hud_window_start_cycle -= deduction;
 	}
+}
+
+// ===========================================================================
+// FEATURE D: prof count -- per-instruction execution counts (NEW_CORE interpreter).
+// ===========================================================================
+//
+// The interpreter's breakpoint loop (cpu_dsl.py) calls kit_count_pc() (kit_prof.h) with the PC of
+// every instruction it is about to execute while kit_count_len is nonzero; this file only owns the
+// table. One uint64_t per 16-bit word: instructions start on even addresses, so the word index is
+// (pc - start) >> 1, and a 64-bit count cannot wrap in any run.
+
+uint32_t  kit_count_start;
+uint32_t  kit_count_len;     // bytes; 0 = off (the interpreter then skips the hook entirely)
+uint64_t *kit_count_tab;
+
+static char   *kit_count_exit_path;
+static uint8_t kit_count_atexit_set;
+
+#define KIT_COUNT_MAX_LEN 0x1000000u   // the whole 24-bit address space
+
+static void kit_count_at_exit(void)
+{
+	if (kit_count_len && kit_count_exit_path) {
+		kit_count_dump(kit_count_exit_path);
+	}
+}
+
+void kit_count_off(void)
+{
+	kit_count_len = 0;
+	free(kit_count_tab);
+	kit_count_tab = NULL;
+	free(kit_count_exit_path);
+	kit_count_exit_path = NULL;
+}
+
+uint8_t kit_count_arm(uint32_t start, uint32_t end, const char *path)
+{
+#ifndef NEW_CORE
+	(void)start; (void)end; (void)path;
+	warning("kit_prof: prof count needs the interpreter core (this build uses the x86 JIT)\n");
+	return 1;
+#else
+	start &= ~1u;
+	if (end <= start || end - start > KIT_COUNT_MAX_LEN) {
+		warning("kit_prof: prof count range %X-%X is empty or larger than 16 MB\n", start, end);
+		return 1;
+	}
+	kit_count_off();
+	uint32_t len = (end - start + 1) & ~1u;
+	kit_count_tab = calloc(len >> 1, sizeof(uint64_t));
+	if (!kit_count_tab) {
+		warning("kit_prof: prof count: out of memory for %X-%X\n", start, end);
+		return 1;
+	}
+	if (path && *path) {
+		kit_count_exit_path = strdup(path);
+		if (!kit_count_atexit_set) {
+			atexit(kit_count_at_exit);
+			kit_count_atexit_set = 1;
+		}
+	}
+	kit_count_start = start;
+	kit_count_len = len; // last: the interpreter only reads the table once this is nonzero
+	return 0;
+#endif
+}
+
+// Written to <path>.tmp and renamed, like vramdump, so a watcher never reads a partial file.
+uint8_t kit_count_dump(const char *path)
+{
+	if (!kit_count_len) {
+		warning("kit_prof: prof countdump: counting is not armed (prof count <start> <end>)\n");
+		return 1;
+	}
+	char tmp_path[1200];
+	int n = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+	if (n <= 0 || n >= (int)sizeof(tmp_path)) {
+		warning("kit_prof: countdump path too long, ignoring '%s'\n", path);
+		return 1;
+	}
+	FILE *f = fopen(tmp_path, "w");
+	if (!f) {
+		warning("kit_prof: countdump failed to open '%s' for writing\n", tmp_path);
+		return 1;
+	}
+	uint32_t lines = 0;
+	uint64_t total = 0;
+	int ok = fprintf(f, "# KIT COUNT start=%x end=%x frame=%u\n",
+		kit_count_start, kit_count_start + kit_count_len, kit_cur_frame) > 0;
+	for (uint32_t i = 0; ok && i < kit_count_len >> 1; i++) {
+		uint64_t c = kit_count_tab[i];
+		if (c) {
+			ok = fprintf(f, "%x\t%llu\n", kit_count_start + (i << 1), (unsigned long long)c) > 0;
+			lines++;
+			total += c;
+		}
+	}
+	if (fclose(f) != 0) {
+		ok = 0;
+	}
+	if (!ok) {
+		warning("kit_prof: countdump write error for '%s'\n", tmp_path);
+		remove(tmp_path);
+		return 1;
+	}
+#ifdef _WIN32
+	remove(path);
+#endif
+	if (rename(tmp_path, path) != 0) {
+		warning("kit_prof: countdump rename '%s' -> '%s' failed\n", tmp_path, path);
+		remove(tmp_path);
+		return 1;
+	}
+	char line[1300];
+	snprintf(line, sizeof(line), "KIT COUNT frame=%u file=%s addrs=%u total=%llu",
+		kit_cur_frame, path, lines, (unsigned long long)total);
+	kit_emit_line(line);
+	return 0;
 }
